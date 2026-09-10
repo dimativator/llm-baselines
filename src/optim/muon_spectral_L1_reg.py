@@ -1,10 +1,4 @@
-"""
-MuonSpectralL1Reg: Muon optimizer with spectral L1 (nuclear-norm) regularization.
-
-After each Muon update step, applies nuclear-norm proximal descent to 2D weight matrices,
-analogous to AdamWSpectralL1Reg but using Muon (Newton-Schulz orthogonalization) as the
-base optimizer.
-"""
+"""Muon with post-step or pre-update decoupled nuclear-norm regularization."""
 
 import math
 import os
@@ -39,8 +33,10 @@ def _singular_value_threshold(W, tau):
 class MuonSpectralL1Reg(Muon):
     """Muon with spectral L1 (nuclear-norm) regularization.
 
-    After each Muon update, applies nuclear-norm proximal descent to all 2D weight
-    matrices that receive the Muon update (i.e. params with ndim >= 2 and size(0) < 10000).
+    By default, the nuclear-norm direction is computed from the post-Muon weights.
+    With ``decoupled_pre_update=True``, it is computed from the pre-update weights
+    and saved before applying the Muon task update, giving
+    ``W <- W - lr * muon_update - lr * coef * NS(W_pre)``.
 
     On most steps, uses the cheap Newton-Schulz subgradient approximation:
         W <- W - tau * zeropower(W)
@@ -62,6 +58,7 @@ class MuonSpectralL1Reg(Muon):
         spectral_l1_reg_coef: Nuclear-norm penalty strength.
         svt_interval: How often to do exact SVT. 0 = always use NS subgradient.
         svt_thresh: SVT threshold. If None, uses lr * spectral_l1_reg_coef.
+        decoupled_pre_update: Compute the NS direction from pre-update weights.
     """
 
     def __init__(
@@ -79,7 +76,13 @@ class MuonSpectralL1Reg(Muon):
         spectral_l1_reg_coef=0.1,
         svt_interval=0,
         svt_thresh=None,
+        decoupled_pre_update=False,
     ):
+        if decoupled_pre_update and svt_interval != 0:
+            raise ValueError(
+                "decoupled_pre_update spectral regularization does not support "
+                "svt_interval; SVT acts on the post-update weights"
+            )
         super().__init__(
             muon_params=muon_params,
             lr=lr,
@@ -95,17 +98,26 @@ class MuonSpectralL1Reg(Muon):
         self.spectral_l1_reg_coef = spectral_l1_reg_coef
         self.svt_interval = svt_interval
         self.svt_thresh = svt_thresh
+        self.decoupled_pre_update = decoupled_pre_update
         self._global_step = 0
 
     @torch.no_grad()
     def step(self):
-        # Run the standard Muon step first
+        coef = self.spectral_l1_reg_coef
+        pre_update_directions = {}
+        if self.decoupled_pre_update and coef > 0:
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if self.state[p].get("use_muon", False) and p.ndim == 2:
+                        pre_update_directions[p] = zeropower_via_newtonschulz5(
+                            p.data, steps=5
+                        )
+
         super().step()
 
         self._global_step += 1
         step = self._global_step
 
-        coef = self.spectral_l1_reg_coef
         if coef <= 0:
             return
 
@@ -120,8 +132,9 @@ class MuonSpectralL1Reg(Muon):
                 if p.ndim != 2:
                     continue
 
-                do_svt = self.svt_interval > 0 and step % self.svt_interval == 0
-                if do_svt:
+                if self.decoupled_pre_update:
+                    p.data.add_(pre_update_directions[p], alpha=-tau)
+                elif self.svt_interval > 0 and step % self.svt_interval == 0:
                     p.data.copy_(_singular_value_threshold(p.data, tau))
                 else:
                     ns_approx = zeropower_via_newtonschulz5(p.data, steps=5)

@@ -427,6 +427,7 @@ def main(args, parser):
             spectral_l1_reg_coef=args.spectral_l1_reg_coef,
             svt_interval=args.spectral_l1_svt_interval,
             svt_thresh=args.spectral_l1_svt_thresh,
+            decoupled_pre_update=args.spectral_l1_reg_pre_update,
         )
     elif args.opt == "muon-nuclear-reg":
         param_list = (

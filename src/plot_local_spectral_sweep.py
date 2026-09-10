@@ -32,10 +32,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_root", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--pattern",
+        default="h200_gpu*_llama124m_adamw_slorr_nuc_decoupled_cf*/metrics.jsonl",
+    )
+    parser.add_argument(
+        "--title",
+        default="LLaMA 124M Adam + decoupled SLORR-Nuc (local logs)",
+    )
     args = parser.parse_args()
 
     metric_files = sorted(
-        args.run_root.glob("h200_gpu*_llama124m_adamw_slorr_nuc_decoupled_cf*/metrics.jsonl"),
+        args.run_root.glob(args.pattern),
         key=lambda path: _coefficient(path.parent),
     )
     if not metric_files:
@@ -82,7 +90,7 @@ def main() -> None:
     rank_axis.set_ylabel("Weighted mean effective rank")
     rank_axis.grid(alpha=0.25)
     rank_axis.legend(ncol=3, fontsize=8)
-    figure.suptitle("LLaMA 124M Adam + decoupled SLORR-Nuc (local logs)")
+    figure.suptitle(args.title)
     figure.tight_layout()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(args.output, dpi=160)
