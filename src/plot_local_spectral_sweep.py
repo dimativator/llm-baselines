@@ -40,6 +40,16 @@ def main() -> None:
         "--title",
         default="LLaMA 124M Adam + decoupled SLORR-Nuc (local logs)",
     )
+    parser.add_argument(
+        "--baseline-metrics",
+        type=Path,
+        help="Optional metrics.jsonl for a reference optimizer run.",
+    )
+    parser.add_argument(
+        "--baseline-label",
+        default="baseline",
+        help="Legend label for --baseline-metrics.",
+    )
     args = parser.parse_args()
 
     metric_files = sorted(
@@ -81,6 +91,40 @@ def main() -> None:
                 marker="o",
                 markersize=3,
                 label=f"cf={coefficient:g}",
+            )
+
+    if args.baseline_metrics is not None:
+        baseline = _read_metrics(args.baseline_metrics)
+        train = [record for record in baseline if record.get("kind") == "train"]
+        validation = [record for record in baseline if record.get("kind") == "val"]
+        ranks = [record for record in baseline if record.get("kind") == "rank"]
+        if train:
+            loss_axis.plot(
+                [record["iter"] for record in train],
+                [record["loss"] for record in train],
+                color="black",
+                alpha=0.25,
+                linewidth=0.8,
+                linestyle="--",
+                label=f"{args.baseline_label} train",
+            )
+        if validation:
+            loss_axis.plot(
+                [record["iter"] for record in validation],
+                [record["loss"] for record in validation],
+                color="black",
+                linewidth=1.8,
+                linestyle="--",
+                label=f"{args.baseline_label} val",
+            )
+        if ranks:
+            rank_axis.plot(
+                [record["iter"] for record in ranks],
+                [record["effective_rank/mean_weighted"] for record in ranks],
+                color="black",
+                linewidth=1.8,
+                linestyle="--",
+                label=args.baseline_label,
             )
 
     loss_axis.set_ylabel("Cross-entropy loss")

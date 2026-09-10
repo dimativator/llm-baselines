@@ -6,7 +6,7 @@ read -r -a COEFFICIENT_VALUES <<< "${COEFFICIENTS:?Set space-separated COEFFICIE
 
 DATASETS_DIR=${DATASETS_DIR:-"/data/users/dimativator/llm-baselines-soap/datasets"}
 TOKENIZED_DATA_DIR=${TOKENIZED_DATA_DIR:-"/data/users/dimativator/llm-baselines-soap/tokenized"}
-RUN_ROOT=${RUN_ROOT:-"$PWD/exps/muon_slorr_nuc_decoupled_l2_124m_h200"}
+RUN_ROOT=${RUN_ROOT:-"$PWD/exps/muon_slorr_nuc_decoupled_124m_h200"}
 PYTHON_BIN=${PYTHON_BIN:-"/data/users/dimativator/anaconda3/envs/eff-pretrain/bin/python"}
 LR=${LR:-1e-3}
 MUON_LR=${MUON_LR:-0.02}
@@ -36,7 +36,7 @@ mkdir -p "$RUN_ROOT"
 "$PYTHON_BIN" -c 'import torch; free, total = torch.cuda.mem_get_info(); print(f"CUDA_PREFLIGHT=OK gpu={torch.cuda.get_device_name(0)} free={free / 2**30:.1f}GiB total={total / 2**30:.1f}GiB")'
 
 for COEFFICIENT in "${COEFFICIENT_VALUES[@]}"; do
-    EXP_NAME="h200_gpu${GPU}_llama124m_muon_slorr_nuc_decoupled_l2wd${WEIGHT_DECAY}_cf${COEFFICIENT}_lr${LR}_muonlr${MUON_LR}_bs${BATCH_SIZE}a${ACC_STEPS}_finewebedu"
+    EXP_NAME="h200_gpu${GPU}_llama124m_muon_slorr_nuc_decoupled_cf${COEFFICIENT}_lr${LR}_muonlr${MUON_LR}_bs${BATCH_SIZE}a${ACC_STEPS}_finewebedu"
     EXP_DIR="$RUN_ROOT/$EXP_NAME"
     if [ -f "$EXP_DIR/COMPLETE" ]; then
         echo "SKIP_COMPLETE cf=$COEFFICIENT exp=$EXP_NAME"
@@ -66,7 +66,6 @@ for COEFFICIENT in "${COEFFICIENT_VALUES[@]}"; do
         --grad_clip 0.5 \
         --seed 0 \
         --weight_decay "$WEIGHT_DECAY" \
-        --muon_matrix_weight_decay "$WEIGHT_DECAY" \
         --spectral_l1_reg_coef "$COEFFICIENT" \
         --spectral_l1_reg_pre_update \
         --spectral_l1_svt_interval 0 \
