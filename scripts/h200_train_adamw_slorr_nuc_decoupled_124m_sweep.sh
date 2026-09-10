@@ -11,6 +11,7 @@ PYTHON_BIN=${PYTHON_BIN:-"/data/users/dimativator/anaconda3/envs/eff-pretrain/bi
 LR=${LR:-5e-3}
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-1}
 ITERATIONS=${ITERATIONS:-19000}
+WARMUP_STEPS=${WARMUP_STEPS:-2000}
 BATCH_SIZE=${BATCH_SIZE:-16}
 ACC_STEPS=${ACC_STEPS:-8}
 EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-16}
@@ -65,7 +66,7 @@ for COEFFICIENT in "${COEFFICIENT_VALUES[@]}"; do
         --spectral_l1_reg_pre_update \
         --spectral_l1_svt_interval 0 \
         --scheduler cos \
-        --warmup_steps 2000 \
+        --warmup_steps "$WARMUP_STEPS" \
         --dropout 0 \
         --beta1 0.9 \
         --beta2 0.95 \
