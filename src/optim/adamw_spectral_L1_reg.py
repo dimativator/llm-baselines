@@ -55,14 +55,14 @@ def _singular_value_threshold(W, tau):
 
 
 class AdamWSpectralL1Reg(torch.optim.Optimizer):
-    """AdamW with decoupled or coupled spectral L1 regularization.
+    """AdamW with post-step, pre-update decoupled, or coupled spectral L1 regularization.
 
-    By default the nuclear-norm prox is applied to the *gradient-stepped*
-    weights Z = W - lr*adam_update, matching proximal gradient descent
-    W_{k+1} = prox(W_k - lr*grad). Set ``coupled=True`` to instead add the
-    nuclear-norm subgradient to the task gradient before Adam updates its
-    moments. This leaves the model's reported task loss unchanged while making
-    the regularizer part of the adaptive Adam update.
+    By default the nuclear-norm direction is computed from the *gradient-stepped*
+    weights Z = W - lr*adam_update. Set ``decoupled_pre_update=True`` for the
+    AdamW/SLORR-style decoupled update: compute the nuclear-norm direction from
+    the pre-update weights W, apply the Adam task update, then subtract the saved
+    direction. Set ``coupled=True`` to instead add the nuclear-norm subgradient
+    to the task gradient before Adam updates its moments.
 
     On most steps the prox is approximated by the cheap Newton-Schulz subgradient
     step (subtract tau*U V^T, tau = lr*spectral_l1_reg_coef). Every ``svt_interval``
@@ -82,6 +82,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
         svt_interval=0,
         svt_thresh=None,
         coupled=False,
+        decoupled_pre_update=False,
     ):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -100,6 +101,16 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                 "coupled spectral L1 regularization does not support svt_interval; "
                 "SVT is a decoupled proximal step"
             )
+        if coupled and decoupled_pre_update:
+            raise ValueError(
+                "coupled and decoupled_pre_update spectral regularization are "
+                "mutually exclusive"
+            )
+        if decoupled_pre_update and svt_interval != 0:
+            raise ValueError(
+                "decoupled_pre_update spectral regularization does not support "
+                "svt_interval; SVT acts on the post-update weights"
+            )
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -109,6 +120,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
             svt_interval=svt_interval,
             svt_thresh=svt_thresh,
             coupled=coupled,
+            decoupled_pre_update=decoupled_pre_update,
         )
 
         super(AdamWSpectralL1Reg, self).__init__(params, defaults)
@@ -132,6 +144,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
             svt_interval = group["svt_interval"]
             svt_thresh = group["svt_thresh"]
             coupled = group["coupled"]
+            decoupled_pre_update = group["decoupled_pre_update"]
 
             for p in group["params"]:
                 grad = p.grad
@@ -170,6 +183,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                 orig_shape = p.data.shape
                 is_conv = len(orig_shape) == 4
                 adam_grad = grad
+                pre_update_spectral_direction = None
                 if (
                     coupled
                     and (len(orig_shape) == 2 or is_conv)
@@ -181,6 +195,15 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                         nuclear_subgradient.view(orig_shape) if is_conv else nuclear_subgradient,
                         alpha=spectral_l1_reg_coef,
                     )
+                elif (
+                    decoupled_pre_update
+                    and (len(orig_shape) == 2 or is_conv)
+                    and spectral_l1_reg_coef > 0
+                ):
+                    weight = p.data.view(orig_shape[0], -1) if is_conv else p.data
+                    pre_update_spectral_direction = zeropower_via_newtonschulz5(
+                        weight, 5
+                    )
 
                 # --- AdamW gradient step: p.data -> Z = W - lr * adam_update ---
                 # Decay the first and second moment running average coefficient
@@ -191,6 +214,16 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
 
                 p.data.addcdiv_(m, denom, value=-(lr / bias_correction1))
 
+                # AdamW/SLORR-style decoupling: the regularizer direction was
+                # computed from W before the task update, but is applied after it.
+                if pre_update_spectral_direction is not None:
+                    p.data.add_(
+                        pre_update_spectral_direction.view(orig_shape)
+                        if is_conv
+                        else pre_update_spectral_direction,
+                        alpha=-(lr * spectral_l1_reg_coef),
+                    )
+
                 # --- Nuclear-norm prox applied to the stepped weights Z ---
                 # (faithful to W_{k+1} = prox(W_k - lr*grad)). Conv2d weights
                 # [out_ch, in_ch, kh, kw] are viewed as the standard "filter
@@ -198,6 +231,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                 # prox applies to them too, unmodified otherwise.
                 if (
                     not coupled
+                    and not decoupled_pre_update
                     and (len(orig_shape) == 2 or is_conv)
                     and spectral_l1_reg_coef > 0
                 ):

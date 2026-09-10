@@ -422,6 +422,10 @@ def parse_args(base_parser, args, namespace):
                         help="adamw-spectral-l1-reg: add the nuclear-norm subgradient to the task "
                              "gradient before Adam updates its moments, instead of applying a separate "
                              "post-update spectral step. The logged loss remains the task loss.")
+    parser.add_argument("--spectral_l1_reg_pre_update", action="store_true",
+                        help="adamw-spectral-l1-reg: use AdamW/SLORR-style decoupling by computing "
+                             "the spectral direction from pre-update weights, then applying the saved "
+                             "direction after the Adam task update.")
 
     # muon-nuclear-reg: nuclear-norm subgradient (UV^T, approximated via Newton-Schulz
     # on W itself) injected into the gradient before the Muon momentum/orthogonalization step.

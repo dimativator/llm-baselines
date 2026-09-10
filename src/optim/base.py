@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import time
 from contextlib import nullcontext
@@ -28,6 +29,11 @@ from .utils import (
     load_worker_state, log_prodigy_lr, save_checkpoint,
     save_worker_state, visualize_routing,
 )
+
+
+def _append_local_metric(exp_dir: Path, payload: dict[str, object]) -> None:
+    with (exp_dir / "metrics.jsonl").open("a") as metric_file:
+        metric_file.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def train(
@@ -167,6 +173,7 @@ def train(
                 distributed_backend,
                 cfg,
                 opt,
+                exp_dir,
                 full_eval=(curr_iter in cfg.full_eval_at),
             )
 
@@ -350,6 +357,15 @@ def train(
                 f"train_loss={train_loss:.3f} iter_dt={dt:.2e}s "
                 f"lr={current_lrs[0]:.2e}"
             )
+            _append_local_metric(
+                exp_dir,
+                {
+                    "kind": "train",
+                    "iter": curr_iter,
+                    "loss": train_loss,
+                    "lr": current_lrs[0],
+                },
+            )
             if cfg.opt == "prodigy":
                 print(f"effective_lr={prodigy_efective_lrs[0]:.2e}")
 
@@ -386,20 +402,24 @@ def train(
             grad_norms = []
 
         if (
-            cfg.wandb
-            and cfg.effective_rank_interval > 0
+            cfg.effective_rank_interval > 0
             and curr_iter % cfg.effective_rank_interval == 0
             and distributed_backend.is_master_process()
         ):
             raw_model = distributed_backend.get_raw_model(model)
             er_logs = model_effective_ranks(raw_model)
             opt_er_logs = optimizer_state_effective_ranks(raw_model, opt)
-            wandb.log({
+            rank_logs = {
+                "kind": "rank",
                 "iter": curr_iter,
                 "effective_rank/mean_weighted": er_logs.get("effective_rank/mean_weighted", 0.0),
                 **_pending_grad_er,
                 **opt_er_logs,
-            })
+            }
+            _append_local_metric(exp_dir, rank_logs)
+            print(f"RANK_METRICS {json.dumps(rank_logs, sort_keys=True)}")
+            if cfg.wandb:
+                wandb.log(rank_logs)
 
     pbar.close()
     return stats
@@ -415,6 +435,7 @@ def eval_and_log(
     distributed_backend,
     cfg,
     opt,
+    exp_dir,
     full_eval=False,
 ):
     if not distributed_backend.is_master_process():
@@ -449,6 +470,16 @@ def eval_and_log(
         f"val_loss={val_loss:.3f} "
         f"val_pp={val_perplexity:.3f} "
         f"val_acc={val_acc:3f}"
+    )
+    _append_local_metric(
+        exp_dir,
+        {
+            "kind": "val",
+            "iter": curr_iter,
+            "loss": val_loss,
+            "perplexity": val_perplexity,
+            "accuracy": val_acc,
+        },
     )
 
     if cfg.wandb:

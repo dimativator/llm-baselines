@@ -405,6 +405,7 @@ def main(args, parser):
             svt_interval=args.spectral_l1_svt_interval,
             svt_thresh=args.spectral_l1_svt_thresh,
             coupled=args.spectral_l1_reg_coupled,
+            decoupled_pre_update=args.spectral_l1_reg_pre_update,
         )
     elif args.opt == "muon-spectral-l1-reg":
         param_list = (
