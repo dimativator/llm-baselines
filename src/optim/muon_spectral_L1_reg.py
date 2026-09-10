@@ -35,8 +35,10 @@ class MuonSpectralL1Reg(Muon):
 
     By default, the nuclear-norm direction is computed from the post-Muon weights.
     With ``decoupled_pre_update=True``, it is computed from the pre-update weights
-    and saved before applying the Muon task update, giving
-    ``W <- W - lr * muon_update - lr * coef * NS(W_pre)``.
+    and saved before applying the optional scalar matrix weight decay and the Muon
+    task update, giving
+    ``W <- (1 - adamw_lr * matrix_wd) * W - lr * muon_update
+    - lr * coef * NS(W_pre)``.
 
     On most steps, uses the cheap Newton-Schulz subgradient approximation:
         W <- W - tau * zeropower(W)
@@ -59,6 +61,9 @@ class MuonSpectralL1Reg(Muon):
         svt_interval: How often to do exact SVT. 0 = always use NS subgradient.
         svt_thresh: SVT threshold. If None, uses lr * spectral_l1_reg_coef.
         decoupled_pre_update: Compute the NS direction from pre-update weights.
+        matrix_weight_decay: Decoupled L2 decay for Muon matrix parameters. The
+            scheduled AdamW fallback learning rate is used for the decay factor,
+            matching the scalar matrix decay in ``DistributedMuon``.
     """
 
     def __init__(
@@ -77,6 +82,7 @@ class MuonSpectralL1Reg(Muon):
         svt_interval=0,
         svt_thresh=None,
         decoupled_pre_update=False,
+        matrix_weight_decay=0.0,
     ):
         if decoupled_pre_update and svt_interval != 0:
             raise ValueError(
@@ -99,6 +105,7 @@ class MuonSpectralL1Reg(Muon):
         self.svt_interval = svt_interval
         self.svt_thresh = svt_thresh
         self.decoupled_pre_update = decoupled_pre_update
+        self.matrix_weight_decay = matrix_weight_decay
         self._global_step = 0
 
     @torch.no_grad()
@@ -112,6 +119,14 @@ class MuonSpectralL1Reg(Muon):
                         pre_update_directions[p] = zeropower_via_newtonschulz5(
                             p.data, steps=5
                         )
+
+        if self.matrix_weight_decay != 0:
+            for group in self.param_groups:
+                matrix_decay_lr = group["adamw_lr_ratio"] * group["lr"]
+                decay_factor = 1 - matrix_decay_lr * self.matrix_weight_decay
+                for p in group["params"]:
+                    if self.state[p].get("use_muon", False):
+                        p.data.mul_(decay_factor)
 
         super().step()
 

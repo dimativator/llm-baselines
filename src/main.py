@@ -428,6 +428,7 @@ def main(args, parser):
             svt_interval=args.spectral_l1_svt_interval,
             svt_thresh=args.spectral_l1_svt_thresh,
             decoupled_pre_update=args.spectral_l1_reg_pre_update,
+            matrix_weight_decay=args.muon_matrix_weight_decay,
         )
     elif args.opt == "muon-nuclear-reg":
         param_list = (

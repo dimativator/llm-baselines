@@ -427,6 +427,10 @@ def parse_args(base_parser, args, namespace):
                              "decoupling by computing "
                              "the spectral direction from pre-update weights, then applying the saved "
                              "direction after the task optimizer update.")
+    parser.add_argument("--muon_matrix_weight_decay", default=0.0, type=float,
+                        help="muon-spectral-l1-reg: decoupled L2 weight decay for Muon matrix "
+                             "parameters. Uses the scheduled AdamW fallback learning rate, matching "
+                             "the scalar matrix decay in d-muon. 0 disables matrix L2 decay.")
 
     # muon-nuclear-reg: nuclear-norm subgradient (UV^T, approximated via Newton-Schulz
     # on W itself) injected into the gradient before the Muon momentum/orthogonalization step.

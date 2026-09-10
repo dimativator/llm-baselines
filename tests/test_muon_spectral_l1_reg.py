@@ -20,7 +20,9 @@ def test_pre_update_decoupled_direction_uses_pre_muon_weights() -> None:
     )
     muon_delta = torch.full_like(initial, -0.1)
 
-    with patch.object(Muon, "step", side_effect=lambda: parameter.data.add_(muon_delta)):
+    with patch.object(
+        Muon, "step", side_effect=lambda: parameter.data.add_(muon_delta)
+    ):
         optimizer.step()
 
     expected = initial + muon_delta - lr * coefficient * (
@@ -40,12 +42,47 @@ def test_default_direction_uses_post_muon_weights() -> None:
     )
     muon_delta = torch.full_like(initial, -0.1)
 
-    with patch.object(Muon, "step", side_effect=lambda: parameter.data.add_(muon_delta)):
+    with patch.object(
+        Muon, "step", side_effect=lambda: parameter.data.add_(muon_delta)
+    ):
         optimizer.step()
 
     post_muon = initial + muon_delta
     expected = post_muon - lr * coefficient * (
         zeropower_via_newtonschulz5(post_muon, 5)
+    )
+    torch.testing.assert_close(parameter, expected)
+
+
+def test_pre_update_decoupled_matrix_l2_matches_d_muon_decay() -> None:
+    initial = torch.tensor([[1.0, 0.5], [-0.25, 2.0]])
+    parameter = torch.nn.Parameter(initial.clone())
+    parameter.grad = torch.ones_like(parameter)
+    muon_lr = 0.02
+    adamw_lr = 1e-3
+    weight_decay = 0.1
+    coefficient = 0.7
+    optimizer = MuonSpectralL1Reg(
+        [parameter],
+        lr=muon_lr,
+        adamw_lr=adamw_lr,
+        spectral_l1_reg_coef=coefficient,
+        decoupled_pre_update=True,
+        matrix_weight_decay=weight_decay,
+    )
+    muon_delta = torch.full_like(initial, -0.1)
+
+    with patch.object(
+        Muon, "step", side_effect=lambda: parameter.data.add_(muon_delta)
+    ):
+        optimizer.step()
+
+    expected = (
+        initial * (1 - adamw_lr * weight_decay)
+        + muon_delta
+        - muon_lr
+        * coefficient
+        * zeropower_via_newtonschulz5(initial, 5)
     )
     torch.testing.assert_close(parameter, expected)
 
