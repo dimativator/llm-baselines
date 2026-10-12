@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,44 @@ CAMPAIGN = "rank_profiles_20261012"
 ROOT = Path(os.environ.get("RANK_RESULT_ROOT", "/workspace-SR006.nfs3/dimativator/results/" + CAMPAIGN))
 SRC = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(SRC))
+DATA_REPO = "DimaTivator/spectral-wd-matched-tokenized"
+DATA_ROOT = Path("/workspace-SR006.nfs3/dimativator/spectral-wd-matched-tokenized")
+DATA_HASHES = {"train.bin": "5a4c532cf1a142834f918f509fc678c178d8edc0df70eaffecc93a955b2f98af",
+               "val.bin": "d3025934e78388200ace8ab058eef34a0dd5a0a3e961d08d637665f436c4996e"}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_data(root: Path) -> None:
+    for name, expected in DATA_HASHES.items():
+        if not (root / name).is_file() or file_sha256(root / name) != expected:
+            raise RuntimeError(f"Missing or mismatched training data: {root / name}")
+        print(f"DATA_VERIFIED {name} {expected}", flush=True)
+
+
+def prepare_data() -> None:
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    revision = HfApi().dataset_info(DATA_REPO).sha
+    for name, expected in DATA_HASHES.items():
+        target = DATA_ROOT / name
+        if target.exists() and file_sha256(target) == expected:
+            continue
+        with tempfile.TemporaryDirectory(prefix="rank_tokens_", dir="/tmp") as cache:
+            source = Path(hf_hub_download(DATA_REPO, name, repo_type="dataset", revision=revision, cache_dir=cache))
+            if file_sha256(source) != expected:
+                raise RuntimeError("Downloaded token hash mismatch")
+            temporary = target.with_suffix(".partial")
+            shutil.copyfile(source, temporary)
+            temporary.replace(target)
+    verify_data(DATA_ROOT)
+    write_json(DATA_ROOT / "provenance.json", dict(repo=DATA_REPO, revision=revision, hashes=DATA_HASHES))
+    print("DATA_PREPARATION_COMPLETE", flush=True)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -33,7 +72,7 @@ def write_json(path: Path, value: object) -> None:
 
 def upload_verified(path: Path, destination: str) -> str:
     api = HfApi()
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = file_sha256(path)
     commit = api.upload_file(path_or_fileobj=str(path), path_in_repo=destination,
                              repo_id=REPO, commit_message=f"{CAMPAIGN}: {path.name}")
     remote = api.get_paths_info(REPO, [destination], revision=commit.oid)[0]
@@ -45,7 +84,7 @@ def upload_verified(path: Path, destination: str) -> str:
     else:
         with tempfile.TemporaryDirectory(prefix="rank_verify_", dir="/tmp") as cache:
             downloaded = hf_hub_download(REPO, destination, revision=commit.oid, cache_dir=cache)
-            if hashlib.sha256(Path(downloaded).read_bytes()).hexdigest() != digest:
+            if file_sha256(Path(downloaded)) != digest:
                 raise RuntimeError("HF upload content verification failed")
     print(f"UPLOAD_VERIFIED {destination} revision={commit.oid} sha256={digest}", flush=True)
     return commit.oid
@@ -152,26 +191,29 @@ def spectral(device: str, size: str) -> None:
                 raise RuntimeError(f"Not final: {label}, iteration={loaded['itr']}")
             payload = measure(loaded["model"], summary["args"], label, "spectral_wd", coef,
                               checkpoint, revision, device)
-            payload["checkpoint_sha256"] = hashlib.sha256(Path(downloaded).read_bytes()).hexdigest()
+            payload["checkpoint_sha256"] = file_sha256(Path(downloaded))
             del loaded
             persist(payload)
         print(f"CHECKPOINT_REMOVED {label}", flush=True)
     print(f"SPECTRAL_COMPLETE size={size} count={len(checkpoints)}", flush=True)
 
 
-def l2(coef: float, smoke: bool = False) -> None:
+def l2(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
     import main as trainer
     from optim.utils import save_checkpoint
     label = f"llama124m_adamw_wd{coef:g}_lr5e-3_finewebedu_rankprofile_20261012"
     if not smoke and (ROOT / (label + "_DONE.json")).exists():
         print("ALREADY_COMPLETE " + label)
         return
-    data = os.environ.get("TOKENIZED_DATA_DIR")
+    data = os.environ.get("TOKENIZED_DATA_DIR", str(DATA_ROOT))
     if not data and not smoke:
         raise RuntimeError("TOKENIZED_DATA_DIR must point to the matched spectral training tokens")
-    iterations = 4 if smoke else 19000
+    if not smoke or gpu_smoke:
+        verify_data(Path(data))
+    tiny = smoke and not gpu_smoke
+    iterations = 8 if gpu_smoke else (4 if smoke else 19000)
     with tempfile.TemporaryDirectory(prefix="rank_l2_", dir="/tmp") as temporary:
-        if smoke:
+        if tiny:
             import numpy as np
             data = temporary + "/tokens"
             Path(data).mkdir()
@@ -182,8 +224,8 @@ def l2(coef: float, smoke: bool = False) -> None:
                     "--tokenized_data_dir", data, "--opt", "adamw", "--weight_decay", str(coef),
                     "--lr", "0.005", "--iterations", str(iterations), "--warmup_steps", "2" if smoke else "2000",
                     "--n_embd", "768", "--n_head", "12", "--n_layer", "12",
-                    "--batch_size", "1" if smoke else "64", "--acc_steps", "1" if smoke else "2",
-                    "--sequence_length", "32" if smoke else "1024", "--eval_batch_size", "1" if smoke else "64",
+                    "--batch_size", "1" if tiny else "64", "--acc_steps", "1" if tiny else "2",
+                    "--sequence_length", "32" if tiny else "1024", "--eval_batch_size", "1" if tiny else "64",
                     "--eval_batches", "1" if smoke else "64", "--grad_clip", "0.5", "--seed", "0",
                     "--data_seed", "1337", "--scheduler", "cos", "--dropout", "0",
                     "--beta1", "0.9", "--beta2", "0.95", "--finewebedu_max_files", "5",
@@ -206,13 +248,23 @@ def l2(coef: float, smoke: bool = False) -> None:
                     revision = upload_verified(checkpoint, path_in_repo)
                     payload = measure(raw.state_dict(), config, label, "adamw_l2", coef,
                                       path_in_repo, revision, "cuda:0")
-                    payload["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+                    payload["checkpoint_sha256"] = file_sha256(checkpoint)
+                    payload["training_data_sha256"] = DATA_HASHES
                     persist(payload)
                     summary = Path(temporary) / label / "summary.json"
                     upload_verified(summary, f"{PREFIX}/{label}/summary.json")
                 else:
                     loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
-                    assert loaded["itr"] == 4
+                    assert loaded["itr"] == iterations
+                    del loaded
+                    probe = {f"transformer.h.0.{name}.weight": torch.tensor([[3.0, 0, 0], [0, 0, 0]])
+                             for name in ("attn.c_attn", "attn.c_proj", "mlp.w1", "mlp.w2", "mlp.c_proj")}
+                    measured = measure(probe, {"n_embd": 2, "n_layer": 1, "iterations": iterations},
+                                       "smoke", "smoke", coef, "synthetic", "none", "cpu")
+                    assert all(row["effective_rank"] == 1 and row["effective_rank_percent"] == 50 for row in measured["rows"])
+                    receipt = ROOT / ("GPU_SMOKE_OK.json" if gpu_smoke else "CPU_SMOKE_OK.json")
+                    write_json(receipt, dict(status="passed", iterations=iterations, checkpoint_removed_after_return=True))
+                    upload_verified(receipt, f"{PREFIX}/{CAMPAIGN}/{receipt.name}")
             print(f"FINAL_CHECKPOINT_REMOVED {label}", flush=True)
         trainer.upload_checkpoint_to_hf = final_checkpoint
         trainer.main(args, parser)
@@ -242,7 +294,7 @@ def inspect() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("inspect", "spectral", "l2", "smoke"))
+    parser.add_argument("mode", choices=("inspect", "spectral", "l2", "smoke", "gpu_smoke", "prepare_data"))
     parser.add_argument("--size", choices=("124", "257"), default="124")
     parser.add_argument("--coef", type=float, default=0.1)
     parser.add_argument("--device", default="cuda:0")
@@ -251,7 +303,9 @@ if __name__ == "__main__":
     torch.set_num_threads(4)
     if arguments.mode == "inspect":
         inspect()
+    elif arguments.mode == "prepare_data":
+        prepare_data()
     elif arguments.mode == "spectral":
         spectral(arguments.device, arguments.size)
     else:
-        l2(arguments.coef, smoke=arguments.mode == "smoke")
+        l2(arguments.coef, smoke=arguments.mode in ("smoke", "gpu_smoke"), gpu_smoke=arguments.mode == "gpu_smoke")
