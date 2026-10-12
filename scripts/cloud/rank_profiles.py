@@ -232,7 +232,7 @@ def l2(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
                     "--tokenized_data_dir", data, "--opt", "adamw", "--weight_decay", str(coef),
                     "--lr", "0.005", "--iterations", str(iterations), "--warmup_steps", "2" if smoke else "2000",
                     "--n_embd", "768", "--n_head", "12", "--n_layer", "12",
-                    "--batch_size", "1" if tiny else "64", "--acc_steps", "1" if tiny else "2",
+                    "--batch_size", "1" if tiny else "32", "--acc_steps", "1" if tiny else "4",
                     "--sequence_length", "32" if tiny else "1024", "--eval_batch_size", "1" if tiny else "64",
                     "--eval_batches", "1" if smoke else "64", "--grad_clip", "0.5", "--seed", "0",
                     "--data_seed", "1337", "--scheduler", "cos", "--dropout", "0",
