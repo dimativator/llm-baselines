@@ -36,7 +36,7 @@ def run(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
         metrics.rename(folder / f'metrics_attempt_{time.time_ns()}.jsonl')
     original_init = trainer.wandb.init
 
-    def log(values: dict, *args, **kwargs) -> None:
+    def log(values: dict, *log_args, **kwargs) -> None:
         numeric = {k: v for k, v in values.items() if isinstance(v, (int, float))}
         numeric['wall_time'] = time.time()
         numeric['batch_size'] = args.batch_size
@@ -44,7 +44,7 @@ def run(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
         numeric['code_revision'] = os.environ.get('RANK_CODE_REVISION', '')
         with metrics.open('a') as stream:
             stream.write(json.dumps(numeric, allow_nan=False) + '\n')
-        loop.wandb.run.log(values, *args, **kwargs)
+        loop.wandb.run.log(values, *log_args, **kwargs)
 
     def init(*args, **kwargs):
         run = original_init(*args, **kwargs)
