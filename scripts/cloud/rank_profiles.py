@@ -132,6 +132,7 @@ def measure(state: dict, config: dict, label: str, family: str, coef: float,
     weighted = sum(r["effective_rank"] * r["full_rank"] for r in transformer) / sum(r["full_rank"] for r in transformer)
     return dict(experiment=label, family=family, coefficient=coef, source=source,
                 source_revision=revision, config=config, rows=rows, singular_values=spectra,
+                code_revision=os.environ.get("RANK_CODE_REVISION"), torch_version=torch.__version__,
                 mean_weighted_effective_rank=weighted,
                 rank_definition="exp(-sum(p*log(p))), p=sigma/sum(sigma), FP32 SVD",
                 zero_matrix_effective_rank=0, group_std="population (ddof=0)")
@@ -252,9 +253,9 @@ def l2(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
                                       path_in_repo, revision, "cuda:0")
                     payload["checkpoint_sha256"] = file_sha256(checkpoint)
                     payload["training_data_sha256"] = DATA_HASHES
-                    persist(payload)
                     summary = Path(temporary) / label / "summary.json"
                     upload_verified(summary, f"{PREFIX}/{label}/summary.json")
+                    persist(payload)
                 else:
                     loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
                     assert loaded["itr"] == iterations
