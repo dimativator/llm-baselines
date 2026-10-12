@@ -29,16 +29,21 @@ def run(coef: float, smoke: bool = False) -> None:
     metrics = folder / 'metrics.jsonl'
     if metrics.exists():
         metrics.rename(folder / f'metrics_attempt_{time.time_ns()}.jsonl')
-    original_log = loop.wandb.log
+    original_init = trainer.wandb.init
 
     def log(values: dict, *args, **kwargs) -> None:
         numeric = {k: v for k, v in values.items() if isinstance(v, (int, float))}
         numeric['wall_time'] = time.time()
         with metrics.open('a') as stream:
             stream.write(json.dumps(numeric, allow_nan=False) + '\n')
-        original_log(values, *args, **kwargs)
+        loop.wandb.run.log(values, *args, **kwargs)
 
-    loop.wandb.log = log
+    def init(*args, **kwargs):
+        run = original_init(*args, **kwargs)
+        loop.wandb.log = log
+        return run
+
+    trainer.wandb.init = init
     excluded: set[int] = set()
     get_model = trainer.get_model
 
