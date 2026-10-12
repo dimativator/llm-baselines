@@ -103,6 +103,8 @@ def measure(state: dict, config: dict, label: str, family: str, coef: float,
         # training-compatible mean over transformer matrices.
         block_match = re.search(r"(?:^|\.)h\.(\d+)\.(.+)", name)
         layer_type = block_match.group(2) if block_match else name.split(".")[-1]
+        if layer_type in ("wte", "lm_head"):
+            layer_type = "wte/lm_head"
         block = int(block_match.group(1)) if block_match else None
         singular = torch.linalg.svdvals(weight.to(device=device, dtype=torch.float32))
         positive = singular[singular > 0]
