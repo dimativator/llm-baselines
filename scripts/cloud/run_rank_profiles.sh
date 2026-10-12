@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export PYTHONUSERBASE=/home/jovyan/.local
+export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/jovyan/.local-efficient}"
 export WANDB_BASE_URL=https://wandb-radfan.ru
 export HF_HOME=/tmp/rank-profile-hf
 export HF_HUB_DISABLE_XET=1
