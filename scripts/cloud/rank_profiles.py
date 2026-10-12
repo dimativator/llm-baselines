@@ -190,10 +190,15 @@ def spectral(device: str, size: str) -> None:
             summary = json.loads(Path(summary_path).read_text())
             downloaded = hf_hub_download(REPO, checkpoint, revision=revision, cache_dir=temporary)
             loaded = torch.load(downloaded, map_location="cpu", weights_only=False)
-            if loaded["itr"] != summary["args"]["iterations"]:
-                raise RuntimeError(f"Not final: {label}, iteration={loaded['itr']}")
-            payload = measure(loaded["model"], summary["args"], label, "spectral_wd", coef,
+            measured_config = summary["args"].copy()
+            planned_iterations = measured_config["iterations"]
+            measured_config["iterations"] = int(loaded["itr"])
+            if loaded["itr"] != planned_iterations:
+                print(f"PARTIAL_CHECKPOINT {label} iteration={loaded['itr']} planned={planned_iterations}", flush=True)
+            payload = measure(loaded["model"], measured_config, label, "spectral_wd", coef,
                               checkpoint, revision, device)
+            payload["planned_iterations"] = planned_iterations
+            payload["checkpoint_is_final"] = loaded["itr"] == planned_iterations
             payload["checkpoint_sha256"] = file_sha256(Path(downloaded))
             del loaded
             persist(payload)
