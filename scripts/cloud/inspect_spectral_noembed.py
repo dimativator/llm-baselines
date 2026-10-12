@@ -1,10 +1,15 @@
 """Publish current log-only artifacts from shared storage; never touch weights."""
 from pathlib import Path
 import json
+import tempfile
+import shutil
 import rank_profiles as ranks
 
 root = Path('/workspace-SR006.nfs3/dimativator/results/spectral_noembed_20261012')
 ranks.CAMPAIGN = 'spectral_noembed_20261012'
+for location in (Path('/tmp'), root, ranks.DATA_ROOT):
+    if location.exists():
+        print('STORAGE', str(location), 'free_bytes', shutil.disk_usage(location).free, flush=True)
 for folder in sorted(root.glob('llama124m_spectral_noembed_coef*')):
     if folder.name.endswith('_smoke'):
         print('SMOKE', folder.name, (folder / 'SUCCESS.json').exists(), flush=True)
@@ -17,9 +22,9 @@ for folder in sorted(root.glob('llama124m_spectral_noembed_coef*')):
                 records.append(json.loads(line))
             except ValueError:
                 pass  # Last append may be in flight.
-        target = folder / 'metrics_snapshot.jsonl'
+        target = Path('/tmp') / (folder.name + '_attempt0_metrics.jsonl')
         target.write_text(''.join(json.dumps(row) + '\n' for row in records))
-        ranks.upload_verified(target, f'{ranks.PREFIX}/{ranks.CAMPAIGN}/{folder.name}/metrics.jsonl')
+        ranks.upload_verified(target, f'{ranks.PREFIX}/{ranks.CAMPAIGN}/attempt0/{folder.name}/metrics.jsonl')
         latest = max((r.get('iter', 0) for r in records), default=0)
         print('PROGRESS', folder.name, latest, 'complete=' + str((folder / 'SUCCESS.json').exists()), flush=True)
     for name in ('SUCCESS.json', 'summary.json', folder.name + '.json', folder.name + '.csv', folder.name + '_grouped.csv'):
