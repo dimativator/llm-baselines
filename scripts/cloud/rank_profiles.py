@@ -169,7 +169,7 @@ def l2(coef: float, smoke: bool = False) -> None:
     data = os.environ.get("TOKENIZED_DATA_DIR")
     if not data and not smoke:
         raise RuntimeError("TOKENIZED_DATA_DIR must point to the matched spectral training tokens")
-    iterations = 2 if smoke else 19000
+    iterations = 4 if smoke else 19000
     with tempfile.TemporaryDirectory(prefix="rank_l2_", dir="/tmp") as temporary:
         if smoke:
             import numpy as np
@@ -180,7 +180,7 @@ def l2(coef: float, smoke: bool = False) -> None:
         sys.argv = ["main.py", "--experiment_name", label, "--results_base_folder", temporary,
                     "--model", "llama", "--dataset", "finewebedu", "--datasets_dir", "/tmp",
                     "--tokenized_data_dir", data, "--opt", "adamw", "--weight_decay", str(coef),
-                    "--lr", "0.005", "--iterations", str(iterations), "--warmup_steps", "1" if smoke else "2000",
+                    "--lr", "0.005", "--iterations", str(iterations), "--warmup_steps", "2" if smoke else "2000",
                     "--n_embd", "768", "--n_head", "12", "--n_layer", "12",
                     "--batch_size", "1" if smoke else "64", "--acc_steps", "1" if smoke else "2",
                     "--sequence_length", "32" if smoke else "1024", "--eval_batch_size", "1" if smoke else "64",
@@ -212,7 +212,7 @@ def l2(coef: float, smoke: bool = False) -> None:
                     upload_verified(summary, f"{PREFIX}/{label}/summary.json")
                 else:
                     loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
-                    assert loaded["itr"] == 2
+                    assert loaded["itr"] == 4
             print(f"FINAL_CHECKPOINT_REMOVED {label}", flush=True)
         trainer.upload_checkpoint_to_hf = final_checkpoint
         trainer.main(args, parser)
