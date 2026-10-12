@@ -27,6 +27,8 @@ def run(coef: float, smoke: bool = False) -> None:
     ranks.ROOT = folder
     ranks.CAMPAIGN = CAMPAIGN
     metrics = folder / 'metrics.jsonl'
+    if metrics.exists():
+        metrics.rename(folder / f'metrics_attempt_{time.time_ns()}.jsonl')
     original_log = loop.wandb.log
 
     def log(values: dict, *args, **kwargs) -> None:
@@ -59,7 +61,8 @@ def run(coef: float, smoke: bool = False) -> None:
                 if unregularized:
                     split.append({**group, 'params': unregularized, 'spectral_l1_reg_coef': 0.0,
                                   'weight_decay': 0.0})
-            super().__init__(split, **kwargs)
+            groups[:] = split  # Keep the trainer's scheduler group list aligned.
+            super().__init__(groups, **kwargs)
             for group in self.param_groups:
                 for p in group['params']:
                     if id(p) in excluded:
