@@ -39,6 +39,9 @@ def run(coef: float, smoke: bool = False, gpu_smoke: bool = False) -> None:
     def log(values: dict, *args, **kwargs) -> None:
         numeric = {k: v for k, v in values.items() if isinstance(v, (int, float))}
         numeric['wall_time'] = time.time()
+        numeric['batch_size'] = args.batch_size
+        numeric['acc_steps'] = args.acc_steps
+        numeric['code_revision'] = os.environ.get('RANK_CODE_REVISION', '')
         with metrics.open('a') as stream:
             stream.write(json.dumps(numeric, allow_nan=False) + '\n')
         loop.wandb.run.log(values, *args, **kwargs)
