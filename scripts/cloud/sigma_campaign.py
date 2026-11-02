@@ -30,7 +30,7 @@ def space(pending: int = 0) -> dict:
     cloud = os.environ.get("SIGMA_CPU_SMOKE") != "1"
     required = (str(ROOT), "/home/jovyan", "/tmp", "/", BOOTSTRAP) if cloud else (str(ROOT), "/tmp", "/")
     for path in required:
-        if cloud and not Path("/workspace-SR006.nfs3").is_mount():
+        if cloud and not Path("/workspace-SR006.nfs3").resolve().is_mount():
             records.append(dict(path=path, ok=False, error="NFS3 mount unavailable"))
             continue
         if cloud and path in ("/home/jovyan", BOOTSTRAP) and not Path(path).is_dir():
