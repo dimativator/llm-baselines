@@ -228,10 +228,17 @@ def coordinate(smoke: bool = False) -> None:
         (ROOT / "spectral_final.pt").unlink()
         write_json(ROOT / "COMPLETE.json", dict(timestamp=time.time(), checkpoint_removed=True))
     except BaseException as error:
+        stopped = []
         for stage, process, log in active.values():
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGSTOP)
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGSTOP)
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                    stopped.append(dict(stage=stage, pid=process.pid, stopped=True))
+                except (ProcessLookupError, subprocess.TimeoutExpired) as stop_error:
+                    stopped.append(dict(stage=stage, pid=process.pid, stopped=process.poll() is not None,
+                                        error=str(stop_error)))
             log.close()
         checkpoint = ROOT / "spectral_final.pt"
         disk = space()
@@ -239,8 +246,8 @@ def coordinate(smoke: bool = False) -> None:
             print("CRITICALLY LOW CLOUD.RU DISK SPACE: TRACKED WORKERS STOPPED. " + json.dumps(disk), flush=True)
         if not disk["ok"] and checkpoint.is_file() and not checkpoint.is_symlink():
             checkpoint.unlink()
-            print("DISK_AFTER_CHECKPOINT_DELETE=" + json.dumps(space()), flush=True)
-        write_json(ROOT / "FAILED.json", dict(error=str(error), timestamp=time.time(), disk=disk))
+            print("CHECKPOINT_DELETED=" + json.dumps(dict(path=str(checkpoint), before=disk, after=space())), flush=True)
+        write_json(ROOT / "FAILED.json", dict(error=str(error), timestamp=time.time(), disk=disk, stopped_workers=stopped))
         print("CAMPAIGN_FAILED=" + str(error), flush=True)
         raise
 
