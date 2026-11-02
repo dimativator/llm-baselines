@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -280,6 +281,24 @@ def main() -> None:
             path = ROOT / name
             if path.is_file():
                 print("MARKER=" + json.dumps(dict(name=name, value=json.loads(path.read_text()))), flush=True)
+        expected = {"reference": 19000, "spectral": 19000, "sigma_1000": 1000,
+                    "sigma_3000": 3000, "sigma_5000": 5000}
+        results_path = ROOT / "results.json"
+        results = json.loads(results_path.read_text()) if results_path.is_file() else []
+        stages = [row.get("stage") for row in results]
+        consistent = len(results) == 5 and set(stages) == set(expected)
+        for row in results:
+            final = ROOT / str(row.get("stage")) / "final.json"
+            consistent = consistent and final.is_file() and row == json.loads(final.read_text())
+            consistent = consistent and row.get("steps") == expected.get(row.get("stage")) and math.isfinite(row.get("val_loss", math.nan))
+        checkpoints = []
+        for folder, _, files in os.walk(ROOT, followlinks=False):
+            checkpoints.extend(str(Path(folder) / name) for name in files
+                               if Path(name).suffix in (".pt", ".pth", ".safetensors"))
+        print("COMPLETION_AUDIT=" + json.dumps(dict(timestamp=time.time(),
+              results_exists=results_path.is_file(), results_consistent=consistent,
+              stages=stages, checkpoint_paths=checkpoints,
+              sole_checkpoint_exists=(ROOT / "spectral_final.pt").exists())), flush=True)
         return
     if args.stage:
         run_worker(args.stage, args.smoke)
