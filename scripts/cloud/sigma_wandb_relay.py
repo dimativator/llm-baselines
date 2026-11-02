@@ -137,14 +137,19 @@ def main() -> None:
         json.dump(dict(pid=os.getpid(), timestamp=time.time()), stream)
     processes = [subprocess.Popen([sys.executable, __file__, "--stage", stage]) for stage in STAGES]
     while any(process.poll() is None for process in processes):
-        if not space()["ok"]:
-            print("CRITICALLY LOW CLOUD.RU DISK SPACE: STOPPING W&B RELAY", flush=True)
+        snapshot = space()
+        codes = [process.poll() for process in processes]
+        if not snapshot["ok"] or any(code is not None and code != 0 for code in codes):
+            failure = dict(timestamp=time.time(), child_exit_codes=codes, disk=snapshot)
+            if snapshot["ok"]:
+                write_json(ROOT / "wandb_relay_failed.json", failure)
+            print("W&B RELAY FAILED: " + json.dumps(failure), flush=True)
             for process in processes:
                 if process.poll() is None:
                     process.terminate()
             for process in processes:
                 process.wait()
-            raise RuntimeError("Disk reserve violated")
+            raise RuntimeError("W&B relay failed; training was not restarted or modified")
         time.sleep(30)
     codes = [process.wait() for process in processes]
     if any(codes):
