@@ -10,7 +10,10 @@ import subprocess
 import sys
 import time
 
-from sigma_campaign import ROOT, enforce, space, write_json
+from sigma_campaign import ROOT, SRC, enforce, space, write_json
+
+# The CPU relay needs no model imports. Avoid shadowing HTTP library imports.
+sys.path.remove(str(SRC))
 
 STAGES = {"reference": "swd26ref", "spectral": "swd26spec", "sigma_1000": "swd26s1k",
           "sigma_3000": "swd26s3k", "sigma_5000": "swd26s5k"}
