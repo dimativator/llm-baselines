@@ -24,13 +24,13 @@ def parse_line(line: str, pending: dict) -> dict | None:
     match = TRAIN.search(line)
     if match:
         step, loss, duration, lr = match.groups()
-        return {"iter": int(step), "train/loss": float(loss), "lr": float(lr),
+        return {"iter": int(step), "train/iter": int(step), "train/loss": float(loss), "lr": float(lr),
                 "train/step_seconds": float(duration), "tokens": int(step) * 128 * 1024}
     match = VALIDATION.search(line)
     if match:
         step, rounded_loss = match.groups()
         native = pending.pop("native_val", {})
-        return {"iter": int(step), "val/loss": native.get("val_loss", float(rounded_loss)),
+        return {"iter": int(step), "val/iter": int(step), "val/loss": native.get("val_loss", float(rounded_loss)),
                 "source/validation_timestamp": native.get("timestamp", 0)}
     if "PROGRESS=" in line:
         value = json.loads(line.split("PROGRESS=", 1)[1])
@@ -66,6 +66,8 @@ def stage_relay(stage: str) -> None:
                              "spectral_pretraining_coefficient": 1, "global_batch": 128,
                              "sequence_length": 1024, "seed": 0, "data_seed": 1337,
                              "sigma_schedule": "cosine_to_zero_without_warmup",
+                             "optimizer": "AdamW" if stage == "reference" else "Adam" if stage.startswith("sigma_") else "Adam+spectralWD",
+                             "warmup_steps": 0 if stage.startswith("sigma_") else 2000,
                              "training_job": "lm-mpi-job-39e0357e-9f2b-4454-b724-bdfe1716dce3",
                              "source": "persistent training logs, backfilled then streamed",
                              "train_loss_precision": "three decimals from original console",
