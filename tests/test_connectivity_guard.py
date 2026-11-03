@@ -35,23 +35,23 @@ class SpaceTests(unittest.TestCase):
                     result = guard.space(Path("/campaign"), pending, smoke=True)
                 self.assertEqual(result["ok"], expected)
 
-    def test_cloud_includes_nfs2_and_bootstrap_even_when_devices_alias(self):
+    def test_cloud_avoids_nfs2_and_includes_actual_bootstrap(self):
         with patch.object(guard, "_probe", side_effect=telemetry) as probe:
             result = guard.space(Path("/workspace-SR006.nfs3/user/campaign"))
         self.assertTrue(result["ok"])
         paths = {row["path"] for row in result["paths"]}
-        self.assertIn("/workspace-SR006.nfs2", paths)
+        self.assertFalse(any("nfs2" in path for path in paths))
         self.assertIn(guard.BOOTSTRAP, paths)
         self.assertIn("/home/jovyan", paths)
-        self.assertEqual(probe.call_count, 6)
+        self.assertEqual(probe.call_count, 5)
         self.assertTrue(all(row["device"] == 7 for row in result["paths"]))
 
     def test_one_unavailable_filesystem_fails_closed(self):
         def probe(path, mount=""):
-            return dict(path=path, error="NFS timed out") if "nfs2" in path else telemetry(path, mount)
+            return dict(path=path, error="NFS timed out") if "nfs3" in path else telemetry(path, mount)
         with patch.object(guard, "_probe", side_effect=probe), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, "DISK_RESERVE_UNAVAILABLE"):
-                guard.enforce(Path("/campaign"))
+                guard.enforce(Path("/workspace-SR006.nfs3/campaign"))
 
     def test_negative_pending_is_rejected(self):
         with self.assertRaises(ValueError):

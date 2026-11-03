@@ -2,6 +2,9 @@
 set -u
 export PYTHONUNBUFFERED=1
 export HF_HOME=/tmp/connectivity-hf-cache
+export XDG_CACHE_HOME=/tmp/connectivity-cache
+export TIKTOKEN_CACHE_DIR=/tmp/connectivity-tiktoken
+export TMPDIR=/tmp
 export HF_HUB_DISABLE_XET=1
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4

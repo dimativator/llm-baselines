@@ -79,9 +79,10 @@ def space(root: Path, pending: int = 0, smoke: bool = False) -> dict:
     paths = [(str(root), "" if smoke else "/workspace-SR006.nfs3"),
              ("/", ""), ("/tmp", "")]
     if not smoke:
+        # User explicitly authorized this campaign to avoid NFS2 entirely.
+        # Gateway policy routes bootstrap logs to NFS3, checked before submit.
         paths += [("/home/jovyan", ""),
-                  (BOOTSTRAP, "/workspace-SR006.nfs3"),
-                  ("/workspace-SR006.nfs2", "/workspace-SR006.nfs2")]
+                  (BOOTSTRAP, "/workspace-SR006.nfs3")]
     records = []
     for path, mount in paths:
         record = _probe(path, mount)
@@ -92,7 +93,8 @@ def space(root: Path, pending: int = 0, smoke: bool = False) -> dict:
         )
         records.append(record)
     return dict(timestamp=time.time(), paths=records, pending_bytes=pending,
-                reserve_bytes=RESERVE, ok=all(row["ok"] for row in records))
+                reserve_bytes=RESERVE, storage_policy="NFS3 only; do not access NFS2",
+                ok=all(row["ok"] for row in records))
 
 
 def enforce(root: Path, pending: int = 0, smoke: bool = False) -> dict:
