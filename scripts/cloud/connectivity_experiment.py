@@ -33,8 +33,12 @@ def write_json(path: Path, payload: object) -> None:
 
 
 def config(smoke: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(n_embd=32 if smoke else 256, n_layer=1 if smoke else 8,
-                           n_head=2 if smoke else 4, vocab_size=128 if smoke else 50304,
+    size = os.environ.get("CONNECTIVITY_MODEL_SIZE", "20m")
+    if size not in ("20m", "124m"):
+        raise ValueError("Unsupported connectivity model size: " + size)
+    width, layers, heads = (768, 12, 12) if size == "124m" else (256, 8, 4)
+    return SimpleNamespace(n_embd=32 if smoke else width, n_layer=1 if smoke else layers,
+                           n_head=2 if smoke else heads, vocab_size=128 if smoke else 50304,
                            sequence_length=16 if smoke else 1024, multiple_of=256,
                            rmsnorm_eps=1e-5, bias=False, dropout=0.0, init_std=0.02,
                            untied_embeds=False, moe=False, parallel_block=False)
@@ -236,15 +240,19 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         initial_straight = interpolate(left, right, control, 0.37, straight=True)
         assert all(torch.allclose(initial_bezier[k], initial_straight[k], atol=1e-7) for k in left)
     batch, accumulation = (1, 1) if smoke else (16, 8)
-    steps = 4 if smoke else 3006
+    count = sum(p.numel() for p in model.parameters())
+    steps = 4 if smoke else math.ceil(20 * count / (batch * accumulation * model.config.sequence_length))
+    warmup = 2 if smoke else round(steps * 100 / 3006)
     optimizer = torch.optim.Adam(list(control.values()), lr=1e-3, betas=(0.9, 0.95), weight_decay=0)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, total_steps=steps,
-                      pct_start=(2 if smoke else 100) / steps, anneal_strategy="cos",
+                      pct_start=warmup / steps, anneal_strategy="cos",
                       cycle_momentum=False, div_factor=100, final_div_factor=1)
     train = Tokens(data / "train.bin", batch, model.config.sequence_length)
     # Start after the endpoint training stream for curve fitting.
-    offset = 0 if smoke else 3006 * accumulation
-    metadata = dict(pair=pair, steps=steps, lr=0.001, batch=batch, accumulation=accumulation,
+    offset = 0 if smoke else steps * accumulation
+    metadata = dict(pair=pair, steps=steps, warmup=warmup, unique_parameters=count,
+                    tokens=steps * batch * accumulation * model.config.sequence_length,
+                    lr=0.001, batch=batch, accumulation=accumulation,
                     objective="unregularized training cross_entropy, t uniform[0,1]",
                     curve="quadratic Bezier, fixed endpoints", train_stream_offset_microsteps=offset)
     write_json(root / pair / "config.json", metadata)

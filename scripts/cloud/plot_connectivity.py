@@ -21,6 +21,16 @@ COLORS = ("#3568ab", "#d27022", "#37906b", "#964f9a")
 STYLES = dict(straight=("#8b8b8b", "--"), bezier=("#255fa7", "-"))
 
 
+class PaperLossNormalize(matplotlib.colors.Normalize):
+    """Shifted log color scale from the authors' plane_plot.py visualization."""
+
+    def __call__(self, value, clip=None):
+        values = np.ma.asarray(value)
+        floor = -5.0
+        shifted = np.ma.maximum(values - self.vmin, np.exp(floor))
+        return 0.9 * (np.ma.log(shifted) - floor) / (np.log(self.vmax - self.vmin) - floor)
+
+
 def read_json(path: Path, default: object) -> object:
     return json.loads(path.read_text()) if path.is_file() else default
 
@@ -133,16 +143,27 @@ def surfaces_plot(surfaces: dict, output: Path, smoke: bool = False) -> list[str
         measured = {(row["a"], row["b"]): row["loss"] for row in rows}
         values = np.array([[measured.get((a, b), np.nan) for a in a_values] for b in b_values])
         if len(a_values) > 1 and len(b_values) > 1 and np.isfinite(values).sum() >= 4:
-            contours = axis.contourf(a_values, b_values, np.ma.masked_invalid(values), levels=14, cmap="viridis")
-            fig.colorbar(contours, ax=axis, label="Cross-entropy", shrink=0.85)
+            low, high = np.nanmin(values), np.nanmax(values)
+            if high <= low:
+                high = low + 0.01
+            # Match the paper's seven log-spaced bands and reversed-jet palette.
+            levels = low + np.exp(np.linspace(-5.0, np.log(high - low), 8))
+            levels[0], levels[-1] = low, high
+            norm = PaperLossNormalize(low - 1e-8, high + 1e-8)
+            masked = np.ma.masked_invalid(values)
+            contours = axis.contourf(a_values, b_values, masked, levels=levels,
+                                     cmap="jet_r", norm=norm, alpha=0.55)
+            axis.contour(a_values, b_values, masked, levels=levels,
+                         cmap="jet_r", norm=norm, linewidths=1.2)
+            fig.colorbar(contours, ax=axis, label="Cross-entropy", shrink=0.85, format="%.3g")
         else:
             points = axis.scatter([row["a"] for row in rows], [row["b"] for row in rows],
-                                  c=[row["loss"] for row in rows], cmap="viridis")
+                                  c=[row["loss"] for row in rows], cmap="jet_r")
             fig.colorbar(points, ax=axis, label="Cross-entropy", shrink=0.85)
         t = np.linspace(0, 1, 201)
-        axis.plot(t, np.zeros_like(t), color="white", linestyle="--", linewidth=2)
-        axis.plot(t, 2*t*(1-t), color="#ff9f31", linewidth=2.5)
-        axis.scatter([0, 1], [0, 0], color="white", edgecolors="black", s=35, zorder=5)
+        axis.plot(t, np.zeros_like(t), color="black", linestyle="--", linewidth=2)
+        axis.plot(t, 2*t*(1-t), color="black", linewidth=2.5)
+        axis.scatter([0, 1], [0, 0], color="black", s=35, zorder=5)
         left, right = pair.split("__")
         for x, label in ((0, NAMES[left]), (1, NAMES[right])):
             axis.annotate(label, (x, 0), xytext=(0, -16), textcoords="offset points",
@@ -153,8 +174,8 @@ def surfaces_plot(surfaces: dict, output: Path, smoke: bool = False) -> list[str
         axis.set(xlabel="a: endpoint direction", ylabel="b: control-bend direction",
                  xlim=(-0.1, 1.1), ylim=(-0.1, 0.65))
         axis.grid(False)
-    fig.legend(handles=[Line2D([0], [0], color="#666666", linestyle="--", label="Straight: b = 0"),
-                        Line2D([0], [0], color="#ff9f31", label="Bézier: b = 2t(1−t)")],
+    fig.legend(handles=[Line2D([0], [0], color="black", linestyle="--", label="Straight: b = 0"),
+                        Line2D([0], [0], color="black", label="Bézier: b = 2t(1−t)")],
                loc="outside lower center", ncol=2, frameon=False)
     return save(fig, output, "loss_plane_contours")
 

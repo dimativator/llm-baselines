@@ -18,7 +18,8 @@ from connectivity_guard import space, enforce, cleanup_checkpoints
 ROOT = Path(os.environ.get("CONNECTIVITY_ROOT", "/workspace-SR006.nfs3/dimativator/mode-connectivity-20m-20261103"))
 DATA = Path(os.environ.get("TOKENIZED_DATA_DIR", "/workspace-SR006.nfs3/dimativator/spectral-wd-matched-tokenized"))
 HF_REPO = "DimaTivator/effpretrain_ckpts"
-PREFIX = "mode_connectivity_20m_20261103"
+PREFIX = os.environ.get("CONNECTIVITY_HF_PREFIX", "mode_connectivity_20m_20261103")
+CHECKPOINT_RESERVE = int(os.environ.get("CONNECTIVITY_CHECKPOINT_RESERVE", "450000000"))
 LABELS = ("l2", "swd05", "swd07", "swd1")
 PAIRS = [a + "__" + b for a, b in itertools.combinations(LABELS, 2)]
 
@@ -95,7 +96,7 @@ def stop(active: dict) -> list[dict]:
 
 
 def coordinate(lane: int, smoke: bool) -> None:
-    enforce(ROOT, pending=450_000_000 if not smoke else 1_000_000, smoke=smoke)
+    enforce(ROOT, pending=CHECKPOINT_RESERVE if not smoke else 1_000_000, smoke=smoke)
     ROOT.mkdir(parents=True, exist_ok=True)
     with (ROOT / f"LANE_{lane}_STARTED.json").open("x") as stream:
         json.dump(dict(timestamp=time.time(), lane=lane, smoke=smoke), stream)
@@ -232,7 +233,7 @@ def worker(stage: str, smoke: bool) -> None:
 
 
 def preflight() -> None:
-    record = space(ROOT, pending=450_000_000)
+    record = space(ROOT, pending=CHECKPOINT_RESERVE)
     record["data_files"] = {name: (DATA / name).stat().st_size if (DATA / name).exists() else None for name in ("train.bin", "val.bin")}
     record["data_ready"] = all(record["data_files"].values())
     record["ok"] = record["ok"] and record["data_ready"]
