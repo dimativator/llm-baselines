@@ -46,8 +46,12 @@ def make_model(smoke: bool) -> Llama:
 
 
 def digest_model(model: torch.nn.Module) -> str:
+    return digest_parameters(dict(model.named_parameters()))
+
+
+def digest_parameters(parameters: dict[str, torch.Tensor]) -> str:
     digest = hashlib.sha256()
-    for name, parameter in model.named_parameters():
+    for name, parameter in parameters.items():
         digest.update(name.encode())
         digest.update(parameter.detach().cpu().numpy().tobytes())
     return digest.hexdigest()
@@ -221,8 +225,16 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         checkpoint = torch.load(root / "checkpoints" / (label + ".pt"), map_location=device, weights_only=True)
         endpoints.append({k: v.detach().requires_grad_(False) for k, v in checkpoint["model"].items()})
     left, right = endpoints
+    endpoint_hashes = [digest_parameters(endpoint) for endpoint in endpoints]
     originals = [{k: v.clone() for k, v in endpoint.items()} for endpoint in endpoints] if smoke else None
     control = {k: torch.nn.Parameter((left[k] + right[k]) / 2) for k in left}
+    if smoke:
+        assert model.transformer.wte.weight is model.lm_head.weight
+        assert all(torch.equal(interpolate(left, right, control, 0)[k], left[k]) for k in left)
+        assert all(torch.equal(interpolate(left, right, control, 1)[k], right[k]) for k in left)
+        initial_bezier = interpolate(left, right, control, 0.37)
+        initial_straight = interpolate(left, right, control, 0.37, straight=True)
+        assert all(torch.allclose(initial_bezier[k], initial_straight[k], atol=1e-7) for k in left)
     batch, accumulation = (1, 1) if smoke else (16, 8)
     steps = 4 if smoke else 3006
     optimizer = torch.optim.Adam(list(control.values()), lr=1e-3, betas=(0.9, 0.95), weight_decay=0)
@@ -254,6 +266,8 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         norm = torch.nn.utils.clip_grad_norm_(list(control.values()), 0.5)
         if not torch.isfinite(norm):
             raise RuntimeError("Nonfinite curve gradient")
+        if smoke:
+            assert norm > 0
         optimizer.step()
         scheduler.step()
         if step % (1 if smoke else 20) == 0 or step == steps - 1:
@@ -298,6 +312,9 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
                 barrier_above_chord=max(row[split]["loss"] - ((1-row["t"])*l0+row["t"]*l1) for row in subset))
     result = dict(metadata=metadata, summary=summary, ranks=rank_rows,
                   elapsed=time.monotonic()-started, endpoint_parameters_frozen=True,
+                  endpoint_sha256=endpoint_hashes,
                   control_checkpoint_saved=False, surface_evaluation_tokens=surfaces[0]["tokens"])
+    if [digest_parameters(endpoint) for endpoint in endpoints] != endpoint_hashes:
+        raise RuntimeError("Curve fitting mutated frozen endpoint weights")
     write_json(root / pair / "final.json", result)
     recorder.finish()

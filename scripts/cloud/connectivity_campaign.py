@@ -177,16 +177,28 @@ def coordinate(lane: int, smoke: bool) -> None:
             publish([ROOT / "COMPLETE.json"], verify=True)
         print("CAMPAIGN_COMPLETE checkpoints_remaining=0", flush=True)
     except BaseException as error:
-        write_json(ROOT / "ABORT.json", dict(timestamp=time.time(), error=repr(error), lane=lane))
+        try:
+            write_json(ROOT / "ABORT.json", dict(timestamp=time.time(), error=repr(error), lane=lane))
+        except OSError as flag_error:
+            print("ABORT_FLAG_WRITE_FAILED=" + repr(flag_error), flush=True)
+        # Stopping tracked writers takes precedence over writing diagnostics.
         stopped = stop(active)
         record = space(ROOT, smoke=smoke)
         emergency = any(row.get("available_bytes", 10**30) < 5_000_000_000 for row in record["paths"])
         # Peer coordinator sees ABORT and stops its own exact child process groups.
-        write_json(ROOT / f"LANE_{lane}_STOPPED.json", dict(stopped=stopped, timestamp=time.time()))
+        try:
+            write_json(ROOT / f"LANE_{lane}_STOPPED.json", dict(stopped=stopped, timestamp=time.time()))
+        except OSError as flag_error:
+            print("STOPPED_FLAG_WRITE_FAILED=" + repr(flag_error), flush=True)
         if emergency:
             print("CRITICALLY LOW CLOUD.RU DISK SPACE: TRACKED WORKERS STOPPED. CLEANING THEIR CHECKPOINTS.", flush=True)
             if not smoke:
-                time.sleep(25)
+                peer = ROOT / f"LANE_{1-lane}_STOPPED.json"
+                deadline = time.monotonic() + 60
+                while not peer.exists() and time.monotonic() < deadline:
+                    time.sleep(2)
+                if not peer.exists():
+                    print("PEER_STOP_UNCONFIRMED: OWN WORKERS STOPPED; PEER GUARD MUST STOP ITS WRITERS", flush=True)
             cleanup_checkpoints(ROOT, emergency=True)
         write_json(ROOT / f"FAILED_lane{lane}.json", dict(error=repr(error), stopped=stopped, storage=record, timestamp=time.time()))
         if not smoke:
