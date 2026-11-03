@@ -10,13 +10,16 @@ import subprocess
 import sys
 import time
 
-from sigma_campaign import ROOT, SRC, enforce, space, write_json
+from sigma_campaign import ROOT, SRC, FACTOR_TUNING, POST_LR, POST_PREFIX, enforce, space, write_json
 
 # The CPU relay needs no model imports. Avoid shadowing HTTP library imports.
 sys.path.remove(str(SRC))
 
 STAGES = {"reference": "swd26ref", "spectral": "swd26spec", "sigma_1000": "swd26s1k",
           "sigma_3000": "swd26s3k", "sigma_5000": "swd26s5k"}
+if FACTOR_TUNING:
+    STAGES = {"spectral": "swd03spec", "factor_1000": "swd03f1k", "factor_3000": "swd03f3k", "factor_5000": "swd03f5k"}
+GROUP = "factor-tuning-124m-20261103" if FACTOR_TUNING else "sigma-only-124m-20261102"
 TRAIN = re.compile(r"Train: Iter=(\d+).*?train_loss=([\d.eE+-]+) iter_dt=([\d.eE+-]+)s lr=([\d.eE+-]+)")
 VALIDATION = re.compile(r">Eval: Iter=(\d+).*?val_loss=([\d.eE+-]+)")
 
@@ -38,6 +41,13 @@ def parse_line(line: str, pending: dict) -> dict | None:
     if "PROGRESS=" in line:
         value = json.loads(line.split("PROGRESS=", 1)[1])
         return {"iter": value["step"], "memory/peak_gpu_bytes": value["peak_gpu_bytes"]}
+    if "RANK=" in line:
+        value = json.loads(line.split("RANK=", 1)[1])
+        result = {"iter": value["step"], "rank/iter": value["step"],
+                  "rank/weighted_effective_rank": value["weighted_effective_rank"]}
+        for row in value["ranks"]:
+            result["rank/matrix/" + row["name"]] = row["effective_rank"]
+        return result
     if "DISK=" in line:
         value = json.loads(line.split("DISK=", 1)[1])
         result = {"source/disk_timestamp": value["timestamp"], "disk/guard_ok": value["ok"]}
@@ -61,22 +71,22 @@ def stage_relay(stage: str) -> None:
     local = Path("/tmp/sigma-wandb") / stage
     local.mkdir(parents=True, exist_ok=True)
     run = wandb.init(entity="andrey", project="ns_weights", id=STAGES[stage], resume="allow",
-                     name="sigma124m_20261102_" + stage, group="sigma-only-124m-20261102",
+                     name=GROUP + "_" + stage, group=GROUP,
                      job_type="sigma-log-relay", dir=str(local),
-                     config={"stage": stage, "model": "llama124m", "lr": 0.005,
-                             "iterations": int(stage.split("_")[1]) if stage.startswith("sigma_") else 19000,
+                     config={"stage": stage, "model": "llama124m", "lr": POST_LR if stage.startswith(POST_PREFIX) else 0.005,
+                             "iterations": int(stage.split("_")[1]) if stage.startswith(POST_PREFIX) else 19000,
                              "weight_decay": 0.1 if stage == "reference" else 0,
                              "spectral_pretraining_coefficient": 1, "global_batch": 128,
                              "sequence_length": 1024, "seed": 0, "data_seed": 1337,
-                             "sigma_schedule": "cosine_to_zero_without_warmup",
-                             "optimizer": "AdamW" if stage == "reference" else "Adam" if stage.startswith("sigma_") else "Adam+spectralWD",
-                             "warmup_steps": 0 if stage.startswith("sigma_") else 2000,
-                             "training_job": "lm-mpi-job-39e0357e-9f2b-4454-b724-bdfe1716dce3",
+                             "post_schedule": "100_step_warmup_cosine_to_zero" if FACTOR_TUNING else "cosine_to_zero_without_warmup",
+                             "optimizer": "AdamW" if stage == "reference" else "Adam" if stage.startswith(POST_PREFIX) else "Adam+spectralWD",
+                             "warmup_steps": (100 if FACTOR_TUNING else 0) if stage.startswith(POST_PREFIX) else 2000,
+                             "training_job": os.environ.get("CAMPAIGN_JOB", "same_allocation"),
                              "source": "persistent training logs, backfilled then streamed",
                              "train_loss_precision": "three decimals from original console",
                              "validation_loss_precision": "native recorded float"})
     run.define_metric("iter")
-    for metric in ("train/*", "val/*", "memory/*", "lr", "tokens"):
+    for metric in ("train/*", "val/*", "rank/*", "memory/*", "lr", "tokens"):
         run.define_metric(metric, step_metric="iter")
     status = dict(url=run.url, id=run.id, stage=stage, timestamp=time.time())
     write_json(ROOT / stage / "wandb_relay.json", status)
@@ -117,8 +127,12 @@ def stage_relay(stage: str) -> None:
             run.log({**summary, "iter": payload["steps"], "rank/per_matrix": wandb.Table(
                 columns=["matrix", "effective_rank", "full_rank", "transformer"],
                 data=[[row["name"], row["effective_rank"], row["full_rank"], row["transformer"]] for row in payload["ranks"]])})
-            artifact = wandb.Artifact("sigma124m-20261102-" + stage, type="metrics")
+            artifact = wandb.Artifact(GROUP + "-" + stage, type="metrics")
             artifact.add_file(str(final), name="final.json")
+            for name in ("COMPLETE.json", "results.json"):
+                path = ROOT / name
+                if path.is_file():
+                    artifact.add_file(str(path), name=name)
             run.log_artifact(artifact)
             run.finish()
             write_json(ROOT / stage / "wandb_relay_done.json", dict(**status, finished=time.time()))
@@ -138,6 +152,7 @@ def main() -> None:
         stage_relay(args.stage)
         return
     enforce()
+    ROOT.mkdir(parents=True, exist_ok=True)
     with (ROOT / "wandb_relay.lock").open("x") as stream:
         json.dump(dict(pid=os.getpid(), timestamp=time.time()), stream)
     processes = [subprocess.Popen([sys.executable, __file__, "--stage", stage]) for stage in STAGES]

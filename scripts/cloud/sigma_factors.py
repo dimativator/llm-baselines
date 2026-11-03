@@ -26,6 +26,42 @@ class SigmaLinear(nn.Module):
         return F.linear(F.linear(x, self.right) * self.sigma.to(x.dtype), self.left, self.bias)
 
 
+class FactorLinear(nn.Module):
+    """Two trainable factors with a fixed inner dimension and frozen bias."""
+
+    def __init__(self, weight: torch.Tensor, rank: int, bias: torch.Tensor | None) -> None:
+        super().__init__()
+        # Rebalance the de-whitened product in ordinary weight coordinates.
+        left, sigma, right = torch.linalg.svd(weight.float(), full_matrices=False)
+        scale = sigma[:rank].sqrt()
+        self.left = nn.Parameter(left[:, :rank] * scale)
+        self.right = nn.Parameter(scale[:, None] * right[:rank])
+        self.register_buffer("bias", bias.detach().clone() if bias is not None else None)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        # Diagnostics and rebalancing must not use TF32 reconstruction.
+        return (self.left.double() @ self.right.double()).float()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(F.linear(x, self.right), self.left, self.bias)
+
+
+def enable_factor_training(model: nn.Module) -> list[str]:
+    """Preserve the compressed weights/rank ceilings and unfreeze RMSNorm."""
+    from models.llama import RMSNorm
+
+    for name, module in list(model.named_modules()):
+        if isinstance(module, SigmaLinear):
+            weight = ((module.left.double() * module.sigma.double()) @ module.right.double()).float()
+            replacement = FactorLinear(weight.detach(), module.sigma.numel(), module.bias)
+            parent, child = name.rsplit(".", 1)
+            setattr(model.get_submodule(parent), child, replacement)
+        elif isinstance(module, RMSNorm):
+            module.requires_grad_(True)
+    return [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+
+
 @torch.no_grad()
 def factorize(model: nn.Module, covariances: dict[str, torch.Tensor]) -> dict:
     """Use exact rounded weight erank, without the optional residual rank increase."""
@@ -57,7 +93,7 @@ def factorize(model: nn.Module, covariances: dict[str, torch.Tensor]) -> dict:
 def measure(model: nn.Module) -> list[dict]:
     rows = []
     for name, module in model.named_modules():
-        if not isinstance(module, (nn.Linear, nn.Embedding, SigmaLinear)):
+        if not isinstance(module, (nn.Linear, nn.Embedding, SigmaLinear, FactorLinear)):
             continue
         weight = module.weight.detach().float()
         singular = torch.linalg.svdvals(weight)

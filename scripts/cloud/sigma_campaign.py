@@ -15,6 +15,10 @@ import time
 ROOT = Path(os.environ.get("SIGMA_ROOT", "/workspace-SR006.nfs3/dimativator/sigma-only-124m-20261102"))
 SRC = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(SRC))
+FACTOR_TUNING = os.environ.get("FACTOR_TUNING") == "1"
+POST_LR = float(os.environ.get("POST_LR", "0.0001")) if FACTOR_TUNING else 0.005
+POST_PREFIX = "factor_" if FACTOR_TUNING else "sigma_"
+STAGES = (["spectral"] if FACTOR_TUNING else ["reference", "spectral"]) + [POST_PREFIX + str(n) for n in (1000, 3000, 5000)]
 RESERVE = 5_000_000_000
 BOOTSTRAP = "/home/jovyan/shares/SR006.nfs3/mlsub-logs"
 
@@ -62,7 +66,7 @@ def run_worker(stage: str, smoke: bool) -> None:
     from compression.svd_llm import collect_input_covariance
     from optim.utils import eval as evaluate
     from rank_profiles import verify_data, DATA_ROOT
-    from sigma_factors import factorize, measure
+    from sigma_factors import enable_factor_training, factorize, measure
 
     enforce()
     def watchdog() -> None:
@@ -77,7 +81,7 @@ def run_worker(stage: str, smoke: bool) -> None:
     data = os.environ.get("TOKENIZED_DATA_DIR", str(DATA_ROOT))
     if not smoke:
         verify_data(Path(data))
-    steps = 4 if smoke else (int(stage.split("_")[1]) if stage.startswith("sigma_") else 19000)
+    steps = 4 if smoke else (int(stage.split("_")[1]) if stage.startswith(POST_PREFIX) else 19000)
     args_list = ["main.py", "--experiment_name", stage, "--results_base_folder", str(ROOT),
                  "--model", "llama", "--dataset", "finewebedu", "--datasets_dir", "/tmp",
                  "--tokenized_data_dir", data, "--opt", "adamw-spectral-l1-reg" if stage == "spectral" else "adamw",
@@ -92,7 +96,7 @@ def run_worker(stage: str, smoke: bool) -> None:
                  "--eval_interval", "500", "--log_interval", "1" if smoke else "20",
                  "--latest_ckpt_interval", "0", "--permanent_ckpt_interval", "0",
                  "--effective_rank_interval", "0"]
-    if stage.startswith("sigma_"):
+    if stage.startswith(POST_PREFIX):
         args_list[args_list.index("--warmup_steps") + 1] = "0"
         args_list[args_list.index("--scheduler") + 1] = "none"
     if smoke:
@@ -124,6 +128,15 @@ def run_worker(stage: str, smoke: bool) -> None:
         print("PROGRESS=" + json.dumps(dict(stage=stage, step=iteration, timestamp=time.time(),
               peak_gpu_bytes=torch.cuda.max_memory_allocated() if torch.cuda.is_available() and not smoke else 0)), flush=True)
 
+        if FACTOR_TUNING:
+            rows = measure(model)
+            transformer = [row for row in rows if row["transformer"]]
+            denominator = sum(row["full_rank"] for row in transformer)
+            snapshot = dict(stage=stage, step=iteration, timestamp=time.time(), ranks=rows,
+                            weighted_effective_rank=sum(row["effective_rank"] * row["full_rank"] for row in transformer) / denominator)
+            write_json(ROOT / stage / "ranks" / f"{iteration:06d}.json", snapshot)
+            print("RANK=" + json.dumps(snapshot), flush=True)
+
     base.eval_and_log = logged_eval
 
     def wrapped_train(**kwargs):
@@ -131,7 +144,7 @@ def run_worker(stage: str, smoke: bool) -> None:
         readers = kwargs["datareaders"]
         val_reader = readers["val"]
         calibration = None
-        if stage.startswith("sigma_"):
+        if stage.startswith(POST_PREFIX):
             checkpoint = torch.load(ROOT / "spectral_final.pt", map_location="cpu", weights_only=False)
             model.load_state_dict(checkpoint["model"])
             del checkpoint
@@ -145,15 +158,30 @@ def run_worker(stage: str, smoke: bool) -> None:
             covariance = collect_input_covariance(model, batches(), n_batches=2 if smoke else 16, device=cfg.device)
             calibration = factorize(model, covariance)
             del covariance
-            opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.005,
+            if FACTOR_TUNING:
+                trainable_names = enable_factor_training(model)
+                write_json(ROOT / stage / "trainable_parameters.json", trainable_names)
+            opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=POST_LR,
                                    betas=(0.9, 0.95), weight_decay=0)
             kwargs["opt"] = opt
-            kwargs["scheduler"] = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=0)
+            warmup = min(100, steps // 2) if FACTOR_TUNING else 0
+            if warmup:
+                warmup_schedule = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1 / warmup, total_iters=warmup)
+                decay_schedule = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps - warmup, eta_min=0)
+                kwargs["scheduler"] = torch.optim.lr_scheduler.SequentialLR(opt, [warmup_schedule, decay_schedule], milestones=[warmup])
+            else:
+                kwargs["scheduler"] = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=0)
+            cfg.lr = POST_LR
+            cfg.warmup_steps = warmup
             cfg.scheduler = "cos"
+            if FACTOR_TUNING:
+                # Match the initial compressed evaluation to the full-split endpoint.
+                cfg.full_eval_at = [0]
             # Continue from the first unseen training batch, using a fresh optimizer.
             original_set_step = train_reader.set_step
             train_reader.set_step = lambda step: original_set_step(step + (0 if smoke else 19000 * cfg.acc_steps))
-            assert sum(p.requires_grad for p in model.parameters()) == len(calibration)
+            if not FACTOR_TUNING:
+                assert sum(p.requires_grad for p in model.parameters()) == len(calibration)
             write_json(ROOT / stage / "factorization.json", calibration)
 
         stats = original_train(**kwargs)
@@ -168,6 +196,8 @@ def run_worker(stage: str, smoke: bool) -> None:
         result = dict(stage=stage, steps=steps, val_loss=loss, perplexity=perplexity, ranks=ranks,
                       factorization=calibration, args=vars(cfg), timestamp=time.time(),
                       optimizer_class=type(kwargs["opt"]).__name__,
+                      final_lr=kwargs["opt"].param_groups[0]["lr"],
+                      trainable_parameters=[name for name, parameter in model.named_parameters() if parameter.requires_grad],
                       scheduler_class=type(kwargs["scheduler"]).__name__,
                       peak_gpu_bytes=torch.cuda.max_memory_allocated() if not smoke else 0)
         if stage == "spectral":
@@ -188,12 +218,15 @@ def coordinate(smoke: bool = False) -> None:
     enforce()
     ROOT.mkdir(parents=True, exist_ok=True)
     active = {}
-    pending = ["reference", "spectral", "sigma_1000", "sigma_3000", "sigma_5000"]
+    pending = list(STAGES)
     with (ROOT / "STARTED.json").open("x") as stream:
         json.dump(dict(timestamp=time.time(), smoke=smoke), stream)
     try:
         while pending or active:
             enforce()
+            relay_exit = os.environ.get("CAMPAIGN_RELAY_EXIT")
+            if relay_exit and Path(relay_exit).is_file() and Path(relay_exit).read_text().strip() != "0":
+                raise RuntimeError("W&B relay failed; see factor-relay.log")
             for gpu, (stage, process, log) in list(active.items()):
                 code = process.poll()
                 if code is not None:
@@ -205,7 +238,7 @@ def coordinate(smoke: bool = False) -> None:
             for gpu in range(1 if smoke else 2):
                 if gpu in active:
                     continue
-                eligible = next((s for s in pending if not s.startswith("sigma_") or (ROOT / "spectral_DONE.json").exists()), None)
+                eligible = next((s for s in pending if not s.startswith(POST_PREFIX) or (ROOT / "spectral_DONE.json").exists()), None)
                 if eligible is None:
                     continue
                 pending.remove(eligible)
@@ -223,8 +256,7 @@ def coordinate(smoke: bool = False) -> None:
                                                capture_output=True, text=True, timeout=10)
                     print("GPU_MEMORY=" + telemetry.stdout.strip(), flush=True)
                 time.sleep(5 if smoke else 30)
-        finals = [json.loads((ROOT / stage / "final.json").read_text()) for stage in
-                  ("reference", "spectral", "sigma_1000", "sigma_3000", "sigma_5000")]
+        finals = [json.loads((ROOT / stage / "final.json").read_text()) for stage in STAGES]
         write_json(ROOT / "results.json", finals)
         (ROOT / "spectral_final.pt").unlink()
         write_json(ROOT / "COMPLETE.json", dict(timestamp=time.time(), checkpoint_removed=True))
@@ -255,7 +287,7 @@ def coordinate(smoke: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=["reference", "spectral", "sigma_1000", "sigma_3000", "sigma_5000"])
+    parser.add_argument("--stage", choices=STAGES)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--inspect", action="store_true")
     args = parser.parse_args()
@@ -267,7 +299,7 @@ def main() -> None:
                 print("NFS2=" + json.dumps(dict(path=path, available_bytes=stat.f_bavail * stat.f_frsize)), flush=True)
             else:
                 print("NFS2=" + json.dumps(dict(path=path, error="Unavailable")), flush=True)
-        for stage in ("reference", "spectral", "sigma_1000", "sigma_3000", "sigma_5000"):
+        for stage in STAGES:
             for name in ("latest_validation.json", "factorization.json", "final.json"):
                 path = ROOT / stage / name
                 if path.is_file():
@@ -281,12 +313,11 @@ def main() -> None:
             path = ROOT / name
             if path.is_file():
                 print("MARKER=" + json.dumps(dict(name=name, value=json.loads(path.read_text()))), flush=True)
-        expected = {"reference": 19000, "spectral": 19000, "sigma_1000": 1000,
-                    "sigma_3000": 3000, "sigma_5000": 5000}
+        expected = {stage: int(stage.split("_")[1]) if stage.startswith(POST_PREFIX) else 19000 for stage in STAGES}
         results_path = ROOT / "results.json"
         results = json.loads(results_path.read_text()) if results_path.is_file() else []
         stages = [row.get("stage") for row in results]
-        consistent = len(results) == 5 and set(stages) == set(expected)
+        consistent = len(results) == len(STAGES) and set(stages) == set(expected)
         for row in results:
             final = ROOT / str(row.get("stage")) / "final.json"
             consistent = consistent and final.is_file() and row == json.loads(final.read_text())
