@@ -37,7 +37,7 @@ def config(smoke: bool = False) -> SimpleNamespace:
                            n_head=2 if smoke else 4, vocab_size=128 if smoke else 50304,
                            sequence_length=16 if smoke else 1024, multiple_of=256,
                            rmsnorm_eps=1e-5, bias=False, dropout=0.0, init_std=0.02,
-                           untied_embeds=False, moe=False)
+                           untied_embeds=False, moe=False, parallel_block=False)
 
 
 def make_model(smoke: bool) -> Llama:
