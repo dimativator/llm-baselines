@@ -4,9 +4,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import pickletools
 import re
 import stat
+import sys
 import time
+import zipfile
 
 from connectivity_guard import enforce
 
@@ -55,19 +58,26 @@ def delete_authorized() -> dict:
 
 
 def inspect_checkpoint(name: str, filename: str) -> dict:
-    import torch
     try:
-        checkpoint = torch.load(filename, map_location='meta', weights_only=True, mmap=True)
-        model = checkpoint.get('model', checkpoint.get('state_dict', {}))
-        names = list(model)
+        # Read serialization opcodes only. Never execute pickle globals or read
+        # tensor payloads, including custom GaLore/APOLLO optimizer projectors.
+        with zipfile.ZipFile(filename) as archive:
+            metadata = [entry for entry in archive.infolist() if entry.filename.endswith('/data.pkl')]
+            if len(metadata) != 1 or metadata[0].file_size > 16_000_000:
+                raise RuntimeError('Unexpected serialization metadata layout')
+            payload = archive.read(metadata[0])
+        strings = [value for op, value, position in pickletools.genops(payload)
+                   if op.name in ('BINUNICODE', 'SHORT_BINUNICODE', 'UNICODE') and isinstance(value, str)]
+        names = list(dict.fromkeys(key for key in strings if key.endswith(('.weight', '.bias'))
+                                  and key.startswith(('transformer.', 'model.', '_orig_mod.'))))
         moe_names = [key for key in names if any(part in key.lower() for part in ('experts', 'router', 'block_sparse_moe'))]
         mlp_names = [key for key in names if re.search(r'(mlp|feed_forward)\.(w1|w2|c_fc|c_proj|gate_proj|up_proj|down_proj)\.weight$', key)]
         classification = 'MoE' if moe_names else ('dense' if mlp_names else 'unresolved')
         blocks = {int(match.group(1)) for key in names if (match := re.search(r'(?:h|layers|blocks)\.(\d+)\.', key))}
         return dict(name=name, path=filename, classification=classification, model_tensor_names=len(names),
                     transformer_blocks=len(blocks), expert_or_router_names=moe_names[:10],
-                    dense_mlp_examples=[dict(name=key, shape=list(model[key].shape)) for key in mlp_names[:4]],
-                    checkpoint_keys=list(checkpoint), iteration=checkpoint.get('itr', checkpoint.get('iter')),
+                    dense_mlp_examples=mlp_names[:4],
+                    method='Static pickle opcode inspection; no unpickling or tensor reads',
                     deleted=False)
     except Exception as error:
         return dict(name=name, path=filename, classification='unresolved', error=repr(error), deleted=False)
@@ -75,9 +85,10 @@ def inspect_checkpoint(name: str, filename: str) -> dict:
 
 if __name__ == '__main__':
     storage = enforce(OUTPUT)
+    inspect_only = '--inspect-only' in sys.argv
     result = dict(authorized_instruction='remove Old Slim-NorMuon 500M checkpoint, step 67,911',
-                  deletion=delete_authorized(), storage_before=storage, timestamp=time.time())
-    target = OUTPUT / 'authorized_slim_checkpoint_cleanup.json'
+                  deletion=None if inspect_only else delete_authorized(), storage_before=storage, timestamp=time.time())
+    target = OUTPUT / ('checkpoint_architecture_metadata.json' if inspect_only else 'authorized_slim_checkpoint_cleanup.json')
     target.write_text(json.dumps(result, indent=2)+'\n')
     result['checkpoint_architectures'] = [inspect_checkpoint(name, path) for name, path in INSPECT.items()]
     result['storage_after'] = enforce(OUTPUT)
