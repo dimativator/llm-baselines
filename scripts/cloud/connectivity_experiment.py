@@ -265,7 +265,9 @@ def train_endpoint(root: Path, label: str, data: Path, smoke: bool) -> None:
                   final_model_sha256=digest_model(model), elapsed=time.monotonic() - started)
     verify_replicas(result["final_model_sha256"])
     checkpoint = root / "checkpoints" / (label + ".pt")
-    enforce(root, pending=4 * count + 16_000_000, smoke=smoke)
+    # Reserve all four endpoint writes, which may arrive concurrently across lanes.
+    pending = max(4 * count + 16_000_000, int(os.environ.get("CONNECTIVITY_CHECKPOINT_RESERVE", "0")))
+    enforce(root, pending=pending, smoke=smoke)
     checkpoint.parent.mkdir(exist_ok=True)
     if rank() == 0:
         torch.save(dict(model={k: p.detach().cpu() for k, p in model.named_parameters()}, config=vars(cfg)), checkpoint)
