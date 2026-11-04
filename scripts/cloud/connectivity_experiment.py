@@ -16,7 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from models.llama import Llama
-from optim.adamw_spectral_L1_reg import AdamWSpectralL1Reg
+from optim.adamw_spectral_L1_reg import AdamWSpectralL1Reg, zeropower_via_newtonschulz5
 from connectivity_guard import enforce
 
 LABELS = ("l2", "swd05", "swd07", "swd1")
@@ -25,7 +25,57 @@ DATA_HASHES = {"train.bin": "5a4c532cf1a142834f918f509fc678c178d8edc0df70eaffecc
                "val.bin": "d3025934e78388200ace8ab058eef34a0dd5a0a3e961d08d637665f436c4996e"}
 
 
+
+def world_size() -> int:
+    return torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+
+
+def rank() -> int:
+    return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+
+def synchronize_gradients(parameters) -> None:
+    if world_size() > 1:
+        for parameter in parameters:
+            torch.distributed.all_reduce(parameter.grad)
+            parameter.grad.div_(world_size())
+
+
+def verify_replicas(digest: str) -> None:
+    if world_size() > 1:
+        gathered = [None] * world_size()
+        torch.distributed.all_gather_object(gathered, digest)
+        if len(set(gathered)) != 1:
+            raise RuntimeError("Distributed model replicas diverged")
+
+
+def mean_scalar(value: float, device: str) -> float:
+    tensor = torch.tensor(value, device=device, dtype=torch.float64)
+    if world_size() > 1:
+        torch.distributed.all_reduce(tensor)
+        tensor.div_(world_size())
+    return tensor.item()
+
+
+@torch.no_grad()
+def add_path_regularizer(left: dict, right: dict, control: dict, t: float,
+                         lambda0: float, lambda1: float) -> dict:
+    # gamma=1. NS5 is the existing approximate nuclear-norm subgradient.
+    coefficient = (1 - t) * lambda0 + t * lambda1
+    chain = 2 * t * (1 - t)
+    square_norm = 0.0
+    for name, parameter in control.items():
+        if parameter.ndim != 2:
+            continue
+        weight = (1-t)**2 * left[name] + chain * parameter + t*t * right[name]
+        update = zeropower_via_newtonschulz5(weight, 5).mul_(chain * coefficient)
+        parameter.grad.add_(update)
+        square_norm += update.square().sum().item()
+    return dict(spectral_lambda=coefficient, spectral_control_gradient_norm=math.sqrt(square_norm))
+
 def write_json(path: Path, payload: object) -> None:
+    if rank() != 0:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
@@ -94,13 +144,15 @@ class Recorder:
         self.path = root / stage / "metrics.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.run = None
-        if not smoke and os.environ.get("WANDB_API_KEY"):
+        if rank() == 0 and not smoke and os.environ.get("WANDB_API_KEY"):
             import wandb
             self.run = wandb.init(project="ns_weights", entity="andrey", group=root.name,
                                   name=root.name + "_" + stage, config=metadata,
                                   dir="/tmp", settings=wandb.Settings(init_timeout=120))
 
     def log(self, payload: dict) -> None:
+        if rank() != 0:
+            return
         payload = dict(timestamp=time.time(), **payload)
         with self.path.open("a") as stream:
             stream.write(json.dumps(payload, allow_nan=False) + "\n")
@@ -119,7 +171,7 @@ def evaluate(model: Llama, reader: Tokens, smoke: bool, batches: int,
     model.eval()
     loss, correct, total = 0.0, 0, 0
     device = str(next(model.parameters()).device)
-    for index in range(batches):
+    for index in range(rank(), batches, world_size()):
         x, y = reader.get(index, device)
         with precision(smoke):
             if parameters is None:
@@ -131,6 +183,11 @@ def evaluate(model: Llama, reader: Tokens, smoke: bool, batches: int,
         loss += output["loss"].item() * tokens
         correct += (output["logits"].argmax(-1) == y).sum().item()
         total += tokens
+    totals = torch.tensor([loss, correct, total], dtype=torch.float64, device=device)
+    if world_size() > 1:
+        torch.distributed.all_reduce(totals)
+    loss, correct, total = totals.tolist()
+    total = int(total)
     mean = loss / total
     return dict(loss=mean, perplexity=math.exp(mean), error_percent=100 * (1 - correct / total), tokens=total)
 
@@ -152,7 +209,9 @@ def train_endpoint(root: Path, label: str, data: Path, smoke: bool) -> None:
     model = make_model(smoke)
     cfg, device = model.config, str(next(model.parameters()).device)
     count = sum(p.numel() for p in model.parameters())
-    batch, accumulation = (1, 1) if smoke else (16, 8)
+    batch, accumulation = (1, world_size()) if smoke else (16, 8)
+    assert accumulation % world_size() == 0
+    local_accumulation = accumulation // world_size()
     steps = 4 if smoke else math.ceil(20 * count / (batch * accumulation * cfg.sequence_length))
     warmup = 2 if smoke else round(steps * 2000 / 19000)
     params = dict(model.named_parameters())
@@ -166,7 +225,7 @@ def train_endpoint(root: Path, label: str, data: Path, smoke: bool) -> None:
                     pct_start=warmup / steps, anneal_strategy="cos", cycle_momentum=False,
                     div_factor=100, final_div_factor=1)
     metadata = dict(model=vars(cfg), unique_parameters=count, steps=steps, warmup=warmup,
-                    batch=batch, accumulation=accumulation, seed=0, data_seed=1337,
+                    batch=batch, accumulation=accumulation, local_accumulation=local_accumulation, world_size=world_size(), seed=0, data_seed=1337,
                     tokens=steps * batch * accumulation * cfg.sequence_length,
                     optimizer=type(optimizer).__name__, coefficient=COEFFICIENTS[label],
                     initial_model_sha256=digest_model(model), lr=0.001,
@@ -185,13 +244,17 @@ def train_endpoint(root: Path, label: str, data: Path, smoke: bool) -> None:
         model.train()
         optimizer.zero_grad(set_to_none=True)
         loss_sum = 0.0
-        for micro in range(accumulation):
-            x, y = train.get(step * accumulation + micro, device)
+        for micro in range(local_accumulation):
+            x, y = train.get(step * accumulation + rank() * local_accumulation + micro, device)
             with precision(smoke):
-                loss = model(x, y)["loss"] / accumulation
+                loss = model(x, y)["loss"] / local_accumulation
             loss.backward()
             loss_sum += loss.item()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        synchronize_gradients(model.parameters())
+        loss_sum = mean_scalar(loss_sum, device)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        if not torch.isfinite(norm):
+            raise RuntimeError("Nonfinite endpoint gradient")
         optimizer.step()
         scheduler.step()
         if step % (1 if smoke else 20) == 0:
@@ -200,10 +263,14 @@ def train_endpoint(root: Path, label: str, data: Path, smoke: bool) -> None:
                               elapsed=time.monotonic() - started))
     result = dict(metadata=metadata, validation=result, ranks=rank_summary(dict(model.named_parameters())),
                   final_model_sha256=digest_model(model), elapsed=time.monotonic() - started)
+    verify_replicas(result["final_model_sha256"])
     checkpoint = root / "checkpoints" / (label + ".pt")
     enforce(root, pending=4 * count + 16_000_000, smoke=smoke)
     checkpoint.parent.mkdir(exist_ok=True)
-    torch.save(dict(model={k: p.detach().cpu() for k, p in model.named_parameters()}, config=vars(cfg)), checkpoint)
+    if rank() == 0:
+        torch.save(dict(model={k: p.detach().cpu() for k, p in model.named_parameters()}, config=vars(cfg)), checkpoint)
+    if world_size() > 1:
+        torch.distributed.barrier()
     write_json(root / label / "final.json", result)
     recorder.finish()
 
@@ -239,7 +306,9 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         initial_bezier = interpolate(left, right, control, 0.37)
         initial_straight = interpolate(left, right, control, 0.37, straight=True)
         assert all(torch.allclose(initial_bezier[k], initial_straight[k], atol=1e-7) for k in left)
-    batch, accumulation = (1, 1) if smoke else (16, 8)
+    batch, accumulation = (1, world_size()) if smoke else (16, 8)
+    assert accumulation % world_size() == 0
+    local_accumulation = accumulation // world_size()
     count = sum(p.numel() for p in model.parameters())
     steps = 4 if smoke else math.ceil(20 * count / (batch * accumulation * model.config.sequence_length))
     warmup = 2 if smoke else round(steps * 100 / 3006)
@@ -250,10 +319,17 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
     train = Tokens(data / "train.bin", batch, model.config.sequence_length)
     # Start after the endpoint training stream for curve fitting.
     offset = 0 if smoke else steps * accumulation
+    spectral = os.environ.get("CONNECTIVITY_PATH_SPECTRAL", "0") == "1"
+    lambda0 = 0.0 if left_label == "l2" else COEFFICIENTS[left_label]
+    lambda1 = 0.0 if right_label == "l2" else COEFFICIENTS[right_label]
     metadata = dict(pair=pair, steps=steps, warmup=warmup, unique_parameters=count,
                     tokens=steps * batch * accumulation * model.config.sequence_length,
-                    lr=0.001, batch=batch, accumulation=accumulation,
-                    objective="unregularized training cross_entropy, t uniform[0,1]",
+                    lr=0.001, batch=batch, accumulation=accumulation, local_accumulation=local_accumulation, world_size=world_size(),
+                    objective=("cross_entropy + lambda(t) sum nuclear_norm(W(t)); approximate NS5 gradient before clipping and Adam"
+                               if spectral else "unregularized training cross_entropy, t uniform[0,1]"),
+                    spectral_regularization=spectral, gamma=1 if spectral else None,
+                    spectral_lambda_endpoints=[lambda0, lambda1] if spectral else [0, 0],
+                    spectral_applies_to_embedding=spectral, ns_steps=5 if spectral else 0,
                     curve="quadratic Bezier, fixed endpoints", train_stream_offset_microsteps=offset)
     write_json(root / pair / "config.json", metadata)
     recorder = Recorder(root, pair, metadata, smoke)
@@ -264,13 +340,16 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         optimizer.zero_grad(set_to_none=True)
         t = float(generator.uniform())
         loss_sum = 0.0
-        for micro in range(accumulation):
-            x, y = train.get(offset + step * accumulation + micro, device)
+        for micro in range(local_accumulation):
+            x, y = train.get(offset + step * accumulation + rank() * local_accumulation + micro, device)
             parameters = interpolate(left, right, control, t)
             with precision(smoke):
-                loss = torch.func.functional_call(model, parameters, (x, y), tie_weights=True)["loss"] / accumulation
+                loss = torch.func.functional_call(model, parameters, (x, y), tie_weights=True)["loss"] / local_accumulation
             loss.backward()
             loss_sum += loss.item()
+        synchronize_gradients(control.values())
+        loss_sum = mean_scalar(loss_sum, device)
+        regularizer = add_path_regularizer(left, right, control, t, lambda0, lambda1) if spectral else {}
         norm = torch.nn.utils.clip_grad_norm_(list(control.values()), 0.5)
         if not torch.isfinite(norm):
             raise RuntimeError("Nonfinite curve gradient")
@@ -279,11 +358,13 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
         optimizer.step()
         scheduler.step()
         if step % (1 if smoke else 20) == 0 or step == steps - 1:
-            recorder.log(dict(step=step + 1, curve_train_loss=loss_sum, t=t, elapsed=time.monotonic() - started))
+            recorder.log(dict(step=step + 1, curve_train_loss=loss_sum, t=t, gradient_norm_before_clip=float(norm), **regularizer, elapsed=time.monotonic() - started))
     if smoke:
         assert all(torch.equal(endpoint[k], original[k]) for endpoint, original in zip(endpoints, originals) for k in endpoint)
         assert any(not torch.equal(control[k], (left[k] + right[k]) / 2) for k in left)
     control = {k: p.detach() for k, p in control.items()}
+    control_hash = digest_parameters(control)
+    verify_replicas(control_hash)
     readers = {split: Tokens(data / (split + ".bin"), 1 if smoke else 8,
                             model.config.sequence_length, 2026) for split in ("train", "val")}
     grid = np.linspace(0, 1, 3 if smoke else 51)
@@ -321,7 +402,7 @@ def train_path(root: Path, pair: str, data: Path, smoke: bool) -> None:
     result = dict(metadata=metadata, summary=summary, ranks=rank_rows,
                   elapsed=time.monotonic()-started, endpoint_parameters_frozen=True,
                   endpoint_sha256=endpoint_hashes,
-                  control_checkpoint_saved=False, surface_evaluation_tokens=surfaces[0]["tokens"])
+                  control_checkpoint_saved=False, control_sha256=control_hash, distributed_replicas_verified=True, surface_evaluation_tokens=surfaces[0]["tokens"])
     if [digest_parameters(endpoint) for endpoint in endpoints] != endpoint_hashes:
         raise RuntimeError("Curve fitting mutated frozen endpoint weights")
     write_json(root / pair / "final.json", result)

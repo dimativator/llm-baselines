@@ -20,6 +20,8 @@ DATA = Path(os.environ.get("TOKENIZED_DATA_DIR", "/workspace-SR006.nfs3/dimativa
 HF_REPO = "DimaTivator/effpretrain_ckpts"
 PREFIX = os.environ.get("CONNECTIVITY_HF_PREFIX", "mode_connectivity_20m_20261103")
 CHECKPOINT_RESERVE = int(os.environ.get("CONNECTIVITY_CHECKPOINT_RESERVE", "450000000"))
+LANES = int(os.environ.get("CONNECTIVITY_LANES", "2"))
+GPUS_PER_RUN = int(os.environ.get("CONNECTIVITY_GPUS_PER_RUN", "1"))
 LABELS = ("l2", "swd05", "swd07", "swd1")
 PAIRS = [a + "__" + b for a, b in itertools.combinations(LABELS, 2)]
 
@@ -101,8 +103,8 @@ def coordinate(lane: int, smoke: bool) -> None:
     with (ROOT / f"LANE_{lane}_STARTED.json").open("x") as stream:
         json.dump(dict(timestamp=time.time(), lane=lane, smoke=smoke), stream)
     data = prepare(smoke)
-    endpoints = list(LABELS) if smoke else list(LABELS[lane*2:lane*2+2])
-    pairs = list(PAIRS) if smoke else (PAIRS[:3] if lane == 0 else PAIRS[3:])
+    endpoints = list(LABELS) if smoke else list(LABELS[lane::LANES]) if LANES == 4 else list(LABELS[lane*2:lane*2+2])
+    pairs = list(PAIRS) if smoke else list(PAIRS[lane::LANES]) if LANES == 4 else (PAIRS[:3] if lane == 0 else PAIRS[3:])
     pending = endpoints + pairs
     active = {}
     last_publish = 0.0
@@ -123,7 +125,7 @@ def coordinate(lane: int, smoke: bool) -> None:
                 if code or not (ROOT / stage / "final.json").is_file():
                     raise RuntimeError("Worker failed: " + stage + " code=" + str(code))
                 write_json(ROOT / (stage + "_DONE.json"), dict(stage=stage, timestamp=time.time()))
-            for gpu in range(1 if smoke else 2):
+            for gpu in range(1 if smoke or GPUS_PER_RUN == 2 else 2):
                 if gpu in active:
                     continue
                 eligible = next((stage for stage in pending if "__" not in stage or
@@ -135,9 +137,12 @@ def coordinate(lane: int, smoke: bool) -> None:
                 folder.mkdir(exist_ok=True)
                 log = (folder / "worker.log").open("x")
                 command = [sys.executable, __file__, "--worker", eligible]
+                if GPUS_PER_RUN == 2:
+                    command = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1",
+                               "--nproc-per-node=2", __file__, "--worker", eligible]
                 if smoke:
                     command.append("--smoke")
-                env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), TOKENIZED_DATA_DIR=str(data))
+                env = dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("CUDA_VISIBLE_DEVICES", "0,1") if GPUS_PER_RUN == 2 else str(gpu), TOKENIZED_DATA_DIR=str(data))
                 process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 active[gpu] = (eligible, process, log)
                 write_json(folder / "process.json", dict(pid=process.pid, gpu=gpu, lane=lane, command=command))
@@ -154,10 +159,10 @@ def coordinate(lane: int, smoke: bool) -> None:
                     print("EXPORT_RETRY=" + repr(error), flush=True)
             time.sleep(1 if smoke else 20)
         write_json(ROOT / f"LANE_{lane}_DONE.json", dict(timestamp=time.time(), lane=lane))
-        if lane == 1 and not smoke:
-            publish([ROOT / "LANE_1_DONE.json"])
+        if lane != 0 and not smoke:
+            publish([ROOT / f"LANE_{lane}_DONE.json"])
             return
-        while not smoke and not (ROOT / "LANE_1_DONE.json").exists():
+        while not smoke and not all((ROOT / f"LANE_{peer}_DONE.json").exists() for peer in range(1, LANES)):
             enforce(ROOT)
             if (ROOT / "ABORT.json").exists():
                 raise RuntimeError("Peer lane aborted")
@@ -194,11 +199,11 @@ def coordinate(lane: int, smoke: bool) -> None:
         if emergency:
             print("CRITICALLY LOW CLOUD.RU DISK SPACE: TRACKED WORKERS STOPPED. CLEANING THEIR CHECKPOINTS.", flush=True)
             if not smoke:
-                peer = ROOT / f"LANE_{1-lane}_STOPPED.json"
+                peers = [ROOT / f"LANE_{peer}_STOPPED.json" for peer in range(LANES) if peer != lane and (ROOT / f"LANE_{peer}_STARTED.json").exists()]
                 deadline = time.monotonic() + 60
-                while not peer.exists() and time.monotonic() < deadline:
+                while not all(peer.exists() for peer in peers) and time.monotonic() < deadline:
                     time.sleep(2)
-                if not peer.exists():
+                if not all(peer.exists() for peer in peers):
                     print("PEER_STOP_UNCONFIRMED: OWN WORKERS STOPPED; PEER GUARD MUST STOP ITS WRITERS", flush=True)
             cleanup_checkpoints(ROOT, emergency=True)
         write_json(ROOT / f"FAILED_lane{lane}.json", dict(error=repr(error), stopped=stopped, storage=record, timestamp=time.time()))
@@ -214,6 +219,11 @@ def worker(stage: str, smoke: bool) -> None:
     from connectivity_experiment import train_endpoint, train_path
     import torch
     torch.set_num_threads(2 if smoke else 4)
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        from datetime import timedelta
+        if not smoke:
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        torch.distributed.init_process_group("gloo" if smoke else "nccl", timeout=timedelta(minutes=30))
     if not smoke:
         torch.backends.cuda.matmul.allow_tf32 = True
     def watchdog() -> None:
@@ -230,6 +240,9 @@ def worker(stage: str, smoke: bool) -> None:
     threading.Thread(target=watchdog, daemon=True).start()
     function = train_path if "__" in stage else train_endpoint
     function(ROOT, stage, DATA, smoke)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 
 def preflight() -> None:
@@ -246,7 +259,7 @@ def preflight() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lane", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--lane", type=int, choices=range(LANES), default=0)
     parser.add_argument("--worker", choices=LABELS + tuple(PAIRS))
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--preflight", action="store_true")
