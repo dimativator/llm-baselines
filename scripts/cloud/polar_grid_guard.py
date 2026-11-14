@@ -1,9 +1,7 @@
 """Bounded, exact-byte Cloud filesystem measurements for the checkpoint-free grid."""
 from __future__ import annotations
 
-import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,17 +10,17 @@ import time
 RESERVE = 5_000_000_000
 ROOT = Path('/home/jovyan/shares/SR006.nfs3/dimativator-polar-grid-124m-20261114')
 BOOTSTRAP = '/home/jovyan/shares/SR006.nfs3/mlsub-logs'
-PATHS = ('/', '/tmp', '/home/jovyan', '/home/jovyan/shares/SR006.nfs2', BOOTSTRAP, str(ROOT))
+PATHS = ('/', '/tmp', '/home/jovyan', BOOTSTRAP, str(ROOT))
 DATA_CANDIDATES = (
-    '/home/jovyan/finewebedu_h200/tokenized',
-    '/workspace-SR006.nfs3/dimativator/finewebedu_h200/tokenized',
-    '/home/jovyan/shares/SR006.nfs3/dimativator/finewebedu_h200/tokenized',
+    '/home/jovyan/shares/SR006.nfs3/dimativator/spectral-wd-matched-tokenized',
+    '/workspace-SR006.nfs3/dimativator/spectral-wd-matched-tokenized',
 )
 PROBE = '''
 import json,os,pathlib,sys,time
 p=pathlib.Path(sys.argv[1])
-if 'SR006.nfs2' in str(p) and not p.exists():
-    raise OSError('Required NFS2 mount unavailable')
+if str(p).startswith('/home/jovyan/shares/SR006.nfs3'):
+    if not pathlib.Path('/home/jovyan/shares/SR006.nfs3').is_mount():
+        raise OSError('Required NFS3 mount unavailable')
 while not p.exists() and p != p.parent: p=p.parent
 p=p.resolve(strict=True)
 s=os.statvfs(p)
