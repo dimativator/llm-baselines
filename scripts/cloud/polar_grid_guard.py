@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 
 RESERVE = 5_000_000_000
-ROOT = Path('/home/jovyan/shares/SR006.nfs3/dimativator-polar-grid-124m-20261114')
+ROOT = Path(os.environ.get('POLAR_GRID_ROOT', '/home/jovyan/shares/SR006.nfs3/dimativator-polar-grid-124m-20261114-b16'))
 BOOTSTRAP = '/home/jovyan/shares/SR006.nfs3/mlsub-logs'
 PATHS = ('/', '/tmp', '/home/jovyan', BOOTSTRAP, str(ROOT))
 DATA_CANDIDATES = (

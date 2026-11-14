@@ -54,7 +54,7 @@ def command(run: dict, root: Path, smoke: bool) -> list[str]:
         '--iterations', '6' if smoke else '19000', '--warmup_steps', '2' if smoke else '2000',
         '--n_embd', '32' if smoke else '768', '--n_head', '2' if smoke else '12',
         '--n_layer', '1' if smoke else '12', '--sequence_length', '16' if smoke else '1024',
-        '--batch_size', '1' if smoke else '64', '--acc_steps', '2',
+        '--batch_size', '1' if smoke else '16', '--acc_steps', '2' if smoke else '8',
         '--grad_clip', '0.5', '--seed', '0', '--data_seed', '1337',
         '--scheduler', 'cos', '--dropout', '0', '--beta1', '0.9', '--beta2', '0.95',
         '--latest_ckpt_interval', '0', '--permanent_ckpt_interval', '0',
@@ -193,6 +193,11 @@ def worker(lane: int, smoke: bool = False) -> None:
             print(tail, flush=True)
             failed.append(dict(**run, returncode=process.returncode, reason=tail[-1500:]))
             save(lane_dir / 'failures.json', dict(failed=failed))
+            numeric = any(word in tail.lower() for word in ('non-finite', 'nonfinite', 'nan', 'floatingpointerror', 'failed to converge'))
+            infrastructure = any(word in tail.lower() for word in ('out of memory', 'modulenotfounderror', 'importerror', 'filenotfounderror', 'checkpoint writes are prohibited'))
+            if infrastructure or not numeric:
+                save(ROOT / 'STOP.json', dict(reason='Infrastructure failure', run=run, returncode=process.returncode, timestamp=time.time()))
+                raise RuntimeError('Infrastructure failure; stopping this attempt before further configurations')
             continue
         final = json.loads((output / 'final.json').read_text())
         expected = 6 if smoke else 19000
