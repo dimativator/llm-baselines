@@ -51,16 +51,16 @@ def command(run: dict, root: Path, smoke: bool) -> list[str]:
         '--require_tokenized_data', '--finewebedu_max_files', '5',
         '--opt', 'adamw-spectral-l1-reg' if run['method'] == 'spectral' else 'adamw',
         '--lr', str(run['lr']), '--weight_decay', str(0.0 if run['method'] == 'spectral' else run['wd']),
-        '--iterations', '3' if smoke else '19000', '--warmup_steps', '1' if smoke else '2000',
+        '--iterations', '6' if smoke else '19000', '--warmup_steps', '2' if smoke else '2000',
         '--n_embd', '32' if smoke else '768', '--n_head', '2' if smoke else '12',
         '--n_layer', '1' if smoke else '12', '--sequence_length', '16' if smoke else '1024',
         '--batch_size', '1' if smoke else '64', '--acc_steps', '2',
         '--grad_clip', '0.5', '--seed', '0', '--data_seed', '1337',
         '--scheduler', 'cos', '--dropout', '0', '--beta1', '0.9', '--beta2', '0.95',
         '--latest_ckpt_interval', '0', '--permanent_ckpt_interval', '0',
-        '--log_interval', '1' if smoke else '100', '--eval_interval', '3' if smoke else '500',
+        '--log_interval', '1' if smoke else '100', '--eval_interval', '6' if smoke else '500',
         '--eval_batches', '2' if smoke else '64',
-        '--effective_rank_interval', '3' if smoke else '1000', '--minimal_metrics']
+        '--effective_rank_interval', '6' if smoke else '1000', '--minimal_metrics']
     if run['method'] == 'spectral':
         arguments += ['--spectral_l1_reg_coef', str(run['wd']), '--spectral_l1_svt_interval', '0',
                       '--spectral_polar_express', '--spectral_decay_groups_only']
@@ -138,7 +138,7 @@ def run_guarded(process: subprocess.Popen, lane_dir: Path, run: dict, completed:
 
 
 def worker(lane: int, smoke: bool = False) -> None:
-    root = ROOT / 'cpu_smoke' if smoke else ROOT
+    root = ROOT / f'cpu_smoke_{int(time.time())}' if smoke else ROOT
     guard = snapshot(pending=100_000_000)
     print('DISK_GUARD=' + json.dumps(guard), flush=True)
     if not guard['ok']:
@@ -195,7 +195,7 @@ def worker(lane: int, smoke: bool = False) -> None:
             save(lane_dir / 'failures.json', dict(failed=failed))
             continue
         final = json.loads((output / 'final.json').read_text())
-        expected = 3 if smoke else 19000
+        expected = 6 if smoke else 19000
         if final['step'] != expected or not final['final'] or not math.isfinite(final['val_loss']):
             failed.append(dict(**run, reason='Invalid final validation result'))
             save(lane_dir / 'failures.json', dict(failed=failed))
@@ -204,6 +204,8 @@ def worker(lane: int, smoke: bool = False) -> None:
         save(lane_dir / 'results.json', dict(completed=completed, checkpoints=0))
         print('RUN_COMPLETE=' + json.dumps(completed[-1]), flush=True)
     save(lane_dir / 'status.json', dict(state='completed' if not failed else 'completed_with_failures', completed=completed, failed=failed, timestamp=time.time()))
+    if smoke and (failed or len(completed) != 3):
+        raise RuntimeError('CPU smoke verification failed')
     print('LANE_COMPLETE=' + json.dumps(dict(lane=lane, completed=len(completed), failed=len(failed), checkpoints=0)), flush=True)
 
 
