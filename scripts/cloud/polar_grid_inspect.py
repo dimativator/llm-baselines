@@ -1,5 +1,8 @@
 """Read only this campaign's minimal metrics from NFS3."""
 import json
+import base64
+import gzip
+import hashlib
 from pathlib import Path
 import time
 
@@ -33,4 +36,9 @@ if __name__ == '__main__':
             result['smokes'].append(dict(path=str(folder), status=json.loads(status.read_text())))
     for suffix in ('*.pt', '*.safetensors'):
         result['checkpoint_files'] += [str(path) for path in ROOT.rglob(suffix)]
-    print('POLAR_GRID_INSPECTION=' + json.dumps(result, allow_nan=False), flush=True)
+    payload = json.dumps(result, allow_nan=False).encode()
+    encoded = base64.b64encode(gzip.compress(payload)).decode()
+    chunks = [encoded[index:index+1200] for index in range(0, len(encoded), 1200)]
+    print('POLAR_GRID_INSPECTION_META=' + json.dumps(dict(chunks=len(chunks), sha256=hashlib.sha256(payload).hexdigest())), flush=True)
+    for index, chunk in enumerate(chunks):
+        print(f'POLAR_GRID_INSPECTION_CHUNK={index}:{chunk}', flush=True)
