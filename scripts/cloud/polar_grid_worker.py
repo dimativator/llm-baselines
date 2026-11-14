@@ -154,7 +154,7 @@ def worker(lane: int, smoke: bool = False) -> None:
         tokens.mkdir(exist_ok=True)
         for split in ('train', 'val'):
             (np.arange(256, dtype=np.uint16) % 128).tofile(tokens / f'{split}.bin')
-        runs = [dict(name=f'smoke_{method}', method=method, lr=0.001, wd=0.01, seed=0)
+        runs = [dict(name=f'smoke_{method}', method=method, lr=0.001, wd=0.0 if method == 'zero_wd' else 0.01, seed=0)
                 for method in ('l2', 'spectral', 'zero_wd')]
     else:
         runs = grid()[lane::10]
