@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import random
+import queue
 import signal
 import subprocess
 import sys
@@ -83,19 +84,37 @@ def run_guarded(process: subprocess.Popen, lane_dir: Path, run: dict, completed:
     """A separate watchdog remains live even if the coordinator blocks on NFS writes."""
     done = threading.Event()
     failures = []
+    messages = queue.Queue(maxsize=8)
+
+    def emit(message: str) -> None:
+        try:
+            messages.put_nowait(message)
+        except queue.Full:
+            pass
+
+    def write_messages() -> None:
+        while not done.is_set() or not messages.empty():
+            try:
+                print(messages.get(timeout=1), flush=True)
+            except queue.Empty:
+                continue
+
+    writer = threading.Thread(target=write_messages, daemon=True)
+    writer.start()
 
     def watch() -> None:
         while not done.is_set():
             guard = snapshot()
-            print('DISK_GUARD=' + json.dumps(guard), flush=True)
             if not guard['ok'] or guard['stop_requested']:
                 failures.append(guard)
                 stopped = stop(process)
-                print('КРИТИЧЕСКИ МАЛО МЕСТА НА CLOUD.RU ИЛИ НЕДОСТУПНА ТЕЛЕМЕТРИЯ. '
-                      'ОТСЛЕЖИВАЕМЫЙ ПРОЦЕСС ОСТАНОВЛЕН. ' + json.dumps(stopped), flush=True)
+                emit('КРИТИЧЕСКИ МАЛО МЕСТА НА CLOUD.RU ИЛИ НЕДОСТУПНА ТЕЛЕМЕТРИЯ. '
+                     'ОТСЛЕЖИВАЕМЫЙ ПРОЦЕСС ОСТАНОВЛЕН. ' + json.dumps(stopped))
+                emit('DISK_GUARD=' + json.dumps(guard))
                 # Stop the exact owned child before touching any shared filesystem.
                 save(ROOT / 'STOP.json', dict(guard=guard, stopped=stopped))
                 return
+            emit('DISK_GUARD=' + json.dumps(guard))
             done.wait(30)
 
     thread = threading.Thread(target=watch, daemon=True)
@@ -110,6 +129,7 @@ def run_guarded(process: subprocess.Popen, lane_dir: Path, run: dict, completed:
         if process.poll() is None:
             print('STOPPED=' + json.dumps(stop(process)), flush=True)
         thread.join(timeout=1)
+        writer.join(timeout=1)
     if failures:
         raise RuntimeError('Storage guard stopped the lane; no checkpoints exist to delete')
 
