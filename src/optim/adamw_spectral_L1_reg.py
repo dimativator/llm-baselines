@@ -1,6 +1,8 @@
 import math
 import torch
 
+from .polar_express import PolarExpress
+
 
 def zeropower_via_newtonschulz5(W, steps):
     """
@@ -82,6 +84,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
         svt_interval=0,
         svt_thresh=None,
         coupled=False,
+        polar_express=False,
     ):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -109,6 +112,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
             svt_interval=svt_interval,
             svt_thresh=svt_thresh,
             coupled=coupled,
+            polar_express=polar_express,
         )
 
         super(AdamWSpectralL1Reg, self).__init__(params, defaults)
@@ -132,6 +136,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
             svt_interval = group["svt_interval"]
             svt_thresh = group["svt_thresh"]
             coupled = group["coupled"]
+            polar = PolarExpress if group["polar_express"] else zeropower_via_newtonschulz5
 
             for p in group["params"]:
                 grad = p.grad
@@ -176,7 +181,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                     and spectral_l1_reg_coef > 0
                 ):
                     weight = p.data.view(orig_shape[0], -1) if is_conv else p.data
-                    nuclear_subgradient = zeropower_via_newtonschulz5(weight, 5)
+                    nuclear_subgradient = polar(weight, 5)
                     adam_grad = grad.add(
                         nuclear_subgradient.view(orig_shape) if is_conv else nuclear_subgradient,
                         alpha=spectral_l1_reg_coef,
@@ -215,7 +220,7 @@ class AdamWSpectralL1Reg(torch.optim.Optimizer):
                         new_W = _singular_value_threshold(W, tau)
                         p.data.copy_(new_W.view(orig_shape) if is_conv else new_W)
                     else:
-                        l1_weight_reg = zeropower_via_newtonschulz5(W, 5)
+                        l1_weight_reg = polar(W, 5)
                         p.data.add_(
                             l1_weight_reg.view(orig_shape) if is_conv else l1_weight_reg,
                             alpha=-(lr * spectral_l1_reg_coef),

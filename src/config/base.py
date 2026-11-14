@@ -402,6 +402,9 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument("--scale_depth", default=1.4, type=float)
 
     parser.add_argument("--spectral_l1_reg_coef", default=0.1, type=float)
+    parser.add_argument("--spectral_polar_express", action="store_true")
+    parser.add_argument("--spectral_decay_groups_only", action="store_true")
+    parser.add_argument("--minimal_metrics", action="store_true")
     parser.add_argument("--wd_schedule", default="none", choices=["none", "linear", "cos"],
                         help="Schedule for weight decay: decay from weight_decay to wd_final.")
     parser.add_argument("--wd_final", default=None, type=float,

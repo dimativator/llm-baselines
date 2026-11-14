@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import time
 from contextlib import nullcontext
@@ -42,6 +43,11 @@ def train(
     lm_evaluator=None,
 ):
     not_compiled_model = model
+    if getattr(cfg, "minimal_metrics", False):
+        assert cfg.latest_ckpt_interval == cfg.permanent_ckpt_interval == 0
+        assert not cfg.weight_average and not cfg.exponential_weight_average
+        assert cfg.hf_checkpoint_repo is None and cfg.svd_rank is None
+        assert not cfg.resume_from and not cfg.init_from
     if cfg.compile:
         print(f"Compiling model ...")
         model = torch.compile(model)
@@ -131,7 +137,7 @@ def train(
     _pending_grad_er: dict[str, float] = {}
     model.train()
 
-    pbar = tqdm(total=cfg.iterations, initial=curr_iter, desc="Training", dynamic_ncols=True)
+    pbar = tqdm(total=cfg.iterations, initial=curr_iter, desc="Training", dynamic_ncols=True, disable=getattr(cfg, "minimal_metrics", False))
     while curr_iter <= cfg.iterations:
         # Save permanent checkpoint
         if cfg.permanent_ckpt_interval > 0:
@@ -336,6 +342,9 @@ def train(
         ):
             train_loss = loss.detach().cpu().item() * cfg.acc_steps
             pbar.set_postfix(loss=f"{train_loss:.3f}", lr=f"{opt.param_groups[0]['lr']:.2e}")
+            if getattr(cfg, "minimal_metrics", False):
+                with open(exp_dir / "metrics.jsonl", "a") as stream:
+                    stream.write(json.dumps(dict(step=curr_iter, train_loss=train_loss, lr=opt.param_groups[0]["lr"])) + "\n")
             train_aux_losses = {
                 f"train/{k}": v for k, v in outputs["aux_losses"].items()
             }
@@ -386,13 +395,17 @@ def train(
             grad_norms = []
 
         if (
-            cfg.wandb
+            (cfg.wandb or getattr(cfg, "minimal_metrics", False))
             and cfg.effective_rank_interval > 0
             and curr_iter % cfg.effective_rank_interval == 0
             and distributed_backend.is_master_process()
         ):
             raw_model = distributed_backend.get_raw_model(model)
             er_logs = model_effective_ranks(raw_model)
+            if getattr(cfg, "minimal_metrics", False):
+                with open(exp_dir / "metrics.jsonl", "a") as stream:
+                    stream.write(json.dumps(dict(step=curr_iter, **er_logs)) + "\n")
+                continue
             opt_er_logs = optimizer_state_effective_ranks(raw_model, opt)
             wandb.log({
                 "iter": curr_iter,
@@ -450,6 +463,15 @@ def eval_and_log(
         f"val_pp={val_perplexity:.3f} "
         f"val_acc={val_acc:3f}"
     )
+
+    if getattr(cfg, "minimal_metrics", False):
+        root = Path(cfg.results_base_folder) / cfg.experiment_name
+        record = dict(step=curr_iter, val_loss=val_loss, final=curr_iter == cfg.iterations)
+        with open(root / "metrics.jsonl", "a") as stream:
+            stream.write(json.dumps(record) + "\n")
+        if record["final"]:
+            with open(root / "final.json", "w") as stream:
+                json.dump(record, stream)
 
     if cfg.wandb:
         if curr_iter == cfg.iterations or full_eval:

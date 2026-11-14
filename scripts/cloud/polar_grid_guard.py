@@ -27,21 +27,22 @@ s=os.statvfs(p)
 m=p
 while not m.is_mount() and m != m.parent: m=m.parent
 print(json.dumps(dict(path=sys.argv[1],measured_path=str(p),mount=str(m),
-    device=os.stat(p).st_dev,available_bytes=s.f_bavail*s.f_frsize,timestamp=time.time())))
+    device=os.stat(p).st_dev,available_bytes=s.f_bavail*s.f_frsize,timestamp=time.time(),
+    stop_requested=pathlib.Path(sys.argv[2], "STOP.json").exists() if sys.argv[1]==sys.argv[2] else False)))
 '''
 
 
-def snapshot(pending: int = 10_000_000) -> dict:
+def snapshot(pending: int = 10_000_000, temporary_bytes: int = 0) -> dict:
     rows = []
     for path in PATHS:
-        process = subprocess.Popen([sys.executable, '-c', PROBE, path],
+        process = subprocess.Popen([sys.executable, '-c', PROBE, path, str(ROOT)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             output, error = process.communicate(timeout=5)
             if process.returncode:
                 raise OSError(error[-500:])
             row = json.loads(output)
-            row['ok'] = row['available_bytes'] > RESERVE + pending
+            row['ok'] = row['available_bytes'] > RESERVE + pending + (temporary_bytes if path in ('/', '/tmp') else 0)
         except (subprocess.TimeoutExpired, OSError, ValueError) as error:
             process.kill()
             for stream in (process.stdout, process.stderr):
@@ -49,7 +50,8 @@ def snapshot(pending: int = 10_000_000) -> dict:
             row = dict(path=path, timestamp=time.time(), error=str(error), ok=False)
         rows.append(row)
     return dict(timestamp=time.time(), reserve_bytes=RESERVE, pending_bytes=pending,
-                paths=rows, ok=all(row['ok'] for row in rows))
+                paths=rows, stop_requested=any(row.get('stop_requested', False) for row in rows),
+                ok=all(row['ok'] for row in rows))
 
 
 def preflight() -> None:

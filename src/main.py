@@ -396,6 +396,11 @@ def main(args, parser):
             adjust_lr_fn=None,  # to make the orthogonalized update have a consistent RMS across rectangular matrices
         )
     elif args.opt == "adamw-spectral-l1-reg":
+        if args.spectral_decay_groups_only:
+            for group in group_specs:
+                group["spectral_l1_reg_coef"] = (
+                    0.0 if group.get("weight_decay") == 0.0 else args.spectral_l1_reg_coef
+                )
         opt = AdamWSpectralL1Reg(
             group_specs,
             lr=args.lr,
@@ -405,6 +410,7 @@ def main(args, parser):
             svt_interval=args.spectral_l1_svt_interval,
             svt_thresh=args.spectral_l1_svt_thresh,
             coupled=args.spectral_l1_reg_coupled,
+            polar_express=args.spectral_polar_express,
         )
     elif args.opt == "muon-spectral-l1-reg":
         param_list = (
