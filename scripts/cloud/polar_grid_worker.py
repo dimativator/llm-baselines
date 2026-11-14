@@ -104,7 +104,10 @@ def run_guarded(process: subprocess.Popen, lane_dir: Path, run: dict, completed:
 
     def watch() -> None:
         while not done.is_set():
-            guard = snapshot()
+            try:
+                guard = snapshot()
+            except Exception as error:
+                guard = dict(ok=False, stop_requested=False, error=repr(error), timestamp=time.time())
             if not guard['ok'] or guard['stop_requested']:
                 failures.append(guard)
                 stopped = stop(process)
