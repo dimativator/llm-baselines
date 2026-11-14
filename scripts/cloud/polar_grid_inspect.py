@@ -3,10 +3,11 @@ import json
 import base64
 import gzip
 import hashlib
+import os
 from pathlib import Path
 import time
 
-from polar_grid_guard import ROOT, snapshot
+from polar_grid_guard import ROOT, BOOTSTRAP, snapshot
 
 
 if __name__ == '__main__':
@@ -36,6 +37,22 @@ if __name__ == '__main__':
             result['smokes'].append(dict(path=str(folder), status=json.loads(status.read_text())))
     for suffix in ('*.pt', '*.safetensors'):
         result['checkpoint_files'] += [str(path) for path in ROOT.rglob(suffix)]
+    bootstrap = Path(BOOTSTRAP) / 'lm-mpi-job-47803121-7278-46f1-a1a3-70d60e423b1c'
+    result['first_job_bootstrap'] = []
+    if bootstrap.exists():
+        for parent, folders, files in os.walk(bootstrap, followlinks=False):
+            if len(Path(parent).relative_to(bootstrap).parts) >= 2:
+                folders[:] = []
+            for name in files[:10]:
+                path = Path(parent) / name
+                if path.is_symlink() or not path.is_file():
+                    continue
+                with path.open('rb') as stream:
+                    stream.seek(max(0, path.stat().st_size - 4000))
+                    tail = stream.read(4000).decode(errors='replace')
+                result['first_job_bootstrap'].append(dict(path=str(path), tail=tail))
+            if len(result['first_job_bootstrap']) >= 20:
+                break
     payload = json.dumps(result, allow_nan=False).encode()
     encoded = base64.b64encode(gzip.compress(payload)).decode()
     chunks = [encoded[index:index+1200] for index in range(0, len(encoded), 1200)]
