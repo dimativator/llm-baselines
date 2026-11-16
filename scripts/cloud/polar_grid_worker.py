@@ -20,6 +20,10 @@ DATA = Path('/tmp/polar-grid-tokens')
 
 
 def grid() -> list[dict]:
+    if os.environ.get('POLAR_GRID_VARIANT') == 'schatten4':
+        return [dict(method='schatten4', lr=0.002, wd=wd, seed=0,
+                     name=f'schatten4_lr0.002_wd{wd:g}')
+                for wd in (0.01, 0.03, 0.1, 0.3, 1.0)]
     runs = []
     for method, values in (
         ('l2', (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0)),
@@ -64,6 +68,8 @@ def command(run: dict, root: Path, smoke: bool) -> list[str]:
     if run['method'] == 'spectral':
         arguments += ['--spectral_l1_reg_coef', str(run['wd']), '--spectral_l1_svt_interval', '0',
                       '--spectral_polar_express', '--spectral_decay_groups_only']
+    elif run['method'] == 'schatten4':
+        arguments[arguments.index('--opt') + 1] = 'adamw-schatten4'
     if smoke:
         arguments += ['--vocab_size', '128']
     return arguments
@@ -95,7 +101,10 @@ def run_guarded(process: subprocess.Popen, lane_dir: Path, run: dict, completed:
     def write_messages() -> None:
         while not done.is_set() or not messages.empty():
             try:
-                print(messages.get(timeout=1), flush=True)
+                message = messages.get(timeout=1)
+                print(message, flush=True)
+                if message.startswith('DISK_GUARD='):
+                    save(lane_dir / 'latest-disk.json', json.loads(message.split('=', 1)[1]))
             except queue.Empty:
                 continue
 
@@ -146,6 +155,7 @@ def worker(lane: int, smoke: bool = False) -> None:
     root.mkdir(parents=True, exist_ok=True)
     lane_dir = root / f'lane{lane}'
     lane_dir.mkdir(exist_ok=True)
+    save(lane_dir / 'latest-disk.json', guard)
     with (lane_dir / 'STARTED.json').open('x') as stream:
         json.dump(dict(lane=lane, pid=os.getpid(), timestamp=time.time()), stream)
     if smoke:
@@ -154,10 +164,12 @@ def worker(lane: int, smoke: bool = False) -> None:
         tokens.mkdir(exist_ok=True)
         for split in ('train', 'val'):
             (np.arange(256, dtype=np.uint16) % 128).tofile(tokens / f'{split}.bin')
+        methods = ('schatten4',) if os.environ.get('POLAR_GRID_VARIANT') == 'schatten4' else ('l2', 'spectral', 'zero_wd')
         runs = [dict(name=f'smoke_{method}', method=method, lr=0.001, wd=0.0 if method == 'zero_wd' else 0.01, seed=0)
-                for method in ('l2', 'spectral', 'zero_wd')]
+                for method in methods]
     else:
-        runs = grid()[lane::10]
+        lanes = 5 if os.environ.get('POLAR_GRID_VARIANT') == 'schatten4' else 10
+        runs = grid()[lane::lanes]
         if not all((DATA / name).is_file() for name in ('train.bin', 'val.bin')):
             guard = snapshot(pending=100_000_000, temporary_bytes=7_536_512_038)
             if not guard['ok'] or guard['stop_requested']:
@@ -209,7 +221,7 @@ def worker(lane: int, smoke: bool = False) -> None:
         save(lane_dir / 'results.json', dict(completed=completed, checkpoints=0))
         print('RUN_COMPLETE=' + json.dumps(completed[-1]), flush=True)
     save(lane_dir / 'status.json', dict(state='completed' if not failed else 'completed_with_failures', completed=completed, failed=failed, timestamp=time.time()))
-    if smoke and (failed or len(completed) != 3):
+    if smoke and (failed or len(completed) != len(runs)):
         raise RuntimeError('CPU smoke verification failed')
     print('LANE_COMPLETE=' + json.dumps(dict(lane=lane, completed=len(completed), failed=len(failed), checkpoints=0)), flush=True)
 

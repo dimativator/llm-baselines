@@ -107,6 +107,7 @@ def parse_args(base_parser, args, namespace):
         default="adamw",
         choices=[
             "adamw",
+            "adamw-schatten4",
             "galore",
             "sgd",
             "muon",

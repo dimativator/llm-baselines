@@ -34,6 +34,7 @@ from optim.sign import Signum
 from optim.soap import SOAP
 from optim.sophia import SophiaG
 from optim.adamw_spectral_L1_reg import AdamWSpectralL1Reg
+from optim.adamw_schatten4 import AdamWSchatten4
 from optim.adamw_nuclear_prox import AdamWNuclearProx
 from optim.muon_spectral_L1_reg import MuonSpectralL1Reg
 from optim.muon_nuclear_reg import MuonNuclearReg
@@ -166,6 +167,14 @@ def main(args, parser):
             betas=(args.beta1, args.beta2),
             weight_decay=args.weight_decay,
             **extra_args,
+        )
+    elif args.opt == "adamw-schatten4":
+        opt = AdamWSchatten4(
+            group_specs,
+            lr=args.lr,
+            betas=(args.beta1, args.beta2),
+            weight_decay=args.weight_decay,
+            fused="cuda" in args.device,
         )
     elif args.opt == "galore":
         galore_groups = build_galore_param_groups(
