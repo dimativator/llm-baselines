@@ -19,7 +19,7 @@ import connectivity_experiment as e
 from connectivity_guard import _probe
 
 HOME = Path('/home/jovyan')
-ROOT = HOME/'dimativator/swd-grid-1m-20261127'
+ROOT = HOME/'dimativator/swd-grid-1m-20261127-r2'
 DATA_URL = 'https://huggingface.co/datasets/DimaTivator/spectral-wd-matched-tokenized/resolve/88651c8d873261b060667ad8b6780bc84f7053bd'
 COUNT = 1058016
 BATCH, LENGTH = 64, 256
@@ -46,7 +46,7 @@ def guard(home_write=0, tmp_write=0):
             free = row.get('available_bytes')
             if free is None or free <= RESERVE+reserved:
                 print('DISK_STOP',json.dumps(row),flush=True)
-                if free is not None and free < RESERVE and ROOT.is_dir() and ROOT.resolve()==HOME.resolve()/'dimativator/swd-grid-1m-20261127' and ROOT.stat().st_dev==p.stat().st_dev:
+                if free is not None and free < RESERVE and ROOT.is_dir() and ROOT.resolve()==HOME.resolve()/'dimativator/swd-grid-1m-20261127-r2' and ROOT.stat().st_dev==p.stat().st_dev:
                     files=[ROOT/f'lambda_{i:03d}.{ext}' for i in range(1,101) for ext in ('pt','part')]
                     files=[f for f in files if not f.is_symlink() and f.is_file() and f.stat().st_nlink==1]
                     for f in sorted(files,key=lambda f:f.stat().st_mtime_ns):
@@ -94,7 +94,8 @@ def prepare_data(tmp):
         if source.stat().st_size!=size or digest.hexdigest()!=expected:
             raise ValueError('FineWeb-Edu split verification failed: '+split)
         arr=np.memmap(source,mode='r',dtype=np.uint16)
-        path=tmp/source.name
+        path=tmp/(split+'.bin')
+        assert path!=source
         written=start=0
         with path.open('wb') as out:
             for offset in range(0,len(arr),65536):

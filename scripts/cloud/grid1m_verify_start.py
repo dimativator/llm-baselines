@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import time
 
-root=Path('/home/jovyan/dimativator/swd-grid-1m-20261127')
+root=Path('/home/jovyan/dimativator/swd-grid-1m-20261127-r2')
 for attempt in range(120):
     if (root/'progress.jsonl').is_file():
         for line in (root/'progress.jsonl').read_text().splitlines():
