@@ -19,3 +19,10 @@ if endpoints:
 if len(endpoints)>1:
     out['seconds_per_model']=(endpoints[-1]['time']-endpoints[0]['time'])/(len(endpoints)-1)
 print('GRID_SNAPSHOT='+json.dumps(out),flush=True)
+if any(r['event']=='complete' for r in events):
+    import gzip,base64
+    selected=[r for r in events if r['event']=='midpoint']
+    # Several short lines survive individual log-line truncation.
+    for n in range(0,len(selected),5):
+        raw=json.dumps(selected[n:n+5],separators=(',',':')).encode()
+        print('MID_BATCH='+base64.b64encode(gzip.compress(raw)).decode(),flush=True)
