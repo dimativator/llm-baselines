@@ -11,6 +11,7 @@ import threading
 import time
 
 import numpy as np
+import requests
 import tiktoken
 import torch
 
@@ -19,7 +20,7 @@ from connectivity_guard import _probe
 
 HOME = Path('/home/jovyan')
 ROOT = HOME/'dimativator/swd-grid-1m-20261127'
-DATA = Path('/workspace-SR006.nfs3/dimativator/spectral-wd-matched-tokenized')
+DATA_URL = 'https://huggingface.co/datasets/DimaTivator/spectral-wd-matched-tokenized/resolve/88651c8d873261b060667ad8b6780bc84f7053bd'
 COUNT = 1058016
 BATCH, LENGTH = 64, 256
 STEPS = math.ceil(20 * COUNT / (BATCH * LENGTH))
@@ -71,14 +72,27 @@ def prepare_data(tmp):
     ranks={s:i for s,i in original._mergeable_ranks.items() if i<4095}
     small=tiktoken.Encoding(name='grid1m_bpe4096',pat_str=original._pat_str,
                             mergeable_ranks=ranks,special_tokens={'<|endoftext|>':4095})
-    for split,needed in [('train',TOKENS+4*BATCH*LENGTH),('val',512*1024)]:
-        source=DATA/(split+'.bin')
+    for split,needed in [('train',TOKENS+4*BATCH*LENGTH),('val',192*1024)]:
+        source=tmp/(split+'.source')
+        headers={'Authorization':'Bearer '+os.environ['HF_TOKEN']}
+        expected=e.DATA_HASHES['val.bin']
+        size=656938
+        if split=='train':
+            size=44040192
+            headers['Range']=f'bytes=0-{size-1}'
+            expected='87de5bb869a839f19de85fe60f61f3a3815a1929079b0abf0644b395bc7ada65'
         digest=hashlib.sha256()
-        with source.open('rb') as f:
-            for buf in iter(lambda:f.read(8<<20),b''):
-                digest.update(buf)
-        if digest.hexdigest()!=e.DATA_HASHES[source.name]:
-            raise ValueError('FineWeb-Edu checksum mismatch: '+str(source))
+        with requests.get(f'{DATA_URL}/{split}.bin',headers=headers,stream=True,timeout=90) as response:
+            if response.status_code!=(206 if split=='train' else 200):
+                raise RuntimeError(f'{split} HTTP {response.status_code}')
+            with source.open('wb') as f:
+                for buf in response.iter_content(1<<20):
+                    if f.tell()+len(buf)>size:
+                        raise ValueError('Exceeded bounded source size')
+                    digest.update(buf)
+                    f.write(buf)
+        if source.stat().st_size!=size or digest.hexdigest()!=expected:
+            raise ValueError('FineWeb-Edu split verification failed: '+split)
         arr=np.memmap(source,mode='r',dtype=np.uint16)
         path=tmp/source.name
         written=start=0
@@ -181,7 +195,7 @@ def analyze(model,val):
 
 if __name__=='__main__':
     assert torch.cuda.device_count()==1
-    guard(home_write=480_000_000,tmp_write=70_000_000)
+    guard(home_write=480_000_000,tmp_write=120_000_000)
     ROOT.mkdir(parents=True,exist_ok=False)
     threading.Thread(target=watch,daemon=True).start()
     note('start',gpu=torch.cuda.get_device_name(0),parameters=COUNT,steps=STEPS,tokens=TOKENS,
